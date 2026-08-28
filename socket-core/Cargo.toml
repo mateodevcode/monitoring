@@ -1,5 +1,5 @@
 [package]
-name = "socket_core"
+name = "socket-core"
 version = "0.1.0"
 edition = "2021"
 
