@@ -28,7 +28,7 @@ jobs:
 
             echo "→ Descartando cambios locales no versionados..."
             git reset --hard HEAD
-            git clean -fd
+            git clean -fd -e admin-agent-data/
 
             echo "→ Actualizando código desde GitHub..."
             git fetch origin main
