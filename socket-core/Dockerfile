@@ -11,6 +11,6 @@ RUN touch src/main.rs && cargo build --release
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates curl
 WORKDIR /root/
-COPY --from=builder /app/target/release/socket_server .
+COPY --from=builder /app/target/release/socket-core .
 EXPOSE 3005
 CMD ["./socket_server"]
