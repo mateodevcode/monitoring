@@ -1,0 +1,51 @@
+services:
+  # EL CORAZÓN - solo transporte, agnóstico, sin lógica de negocio
+  socket-core:
+    build:
+      context: ./socket-core
+      dockerfile: Dockerfile
+    container_name: rust-socket-core
+    restart: unless-stopped
+    # SIN "ports:" -> no habla con internet directo, solo dentro de Docker.
+    # Si el frontend necesita WS, Nginx hace proxy hacia este nombre de servicio.
+    environment:
+      - RUST_LOG=info
+    networks:
+      - central_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3005/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # EL AGENTE - control total del host, por eso va detrás de Tailscale + JWT + OTP
+  admin-agent:
+    build:
+      context: ./admin-agent
+      dockerfile: Dockerfile
+    container_name: rust-admin-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=info
+      - CORE_WS_URL=ws://socket-core:3005/ws
+      - CORE_REST_URL=http://socket-core:3005
+      - DB_PATH=/app/data/threats.db
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./admin-agent-data:/app/data
+      - /proc:/proc:ro
+      - /sys:/sys:ro
+    # SIN "ports:" -> solo Nginx (que solo escucha en la IP de Tailscale
+    # para este vhost) puede llegar a este contenedor. Ver Fase 5.
+    networks:
+      - central_network
+    depends_on:
+      socket-core:
+        condition: service_healthy
+
+networks:
+  central_network:
+    external: true

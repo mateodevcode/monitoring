@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  socket-server:
+    build: .
+    container_name: socket-pubsub-dev
+    ports:
+      - "127.0.0.1:3005:3005"
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped

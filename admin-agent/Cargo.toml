@@ -1,0 +1,47 @@
+[package]
+name = "rust-admin-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+# procfs = "0.16"
+sysinfo = "0.39.6"
+
+# Serialización (unificada)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP Client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ureq = "2.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilidades
+uuid = { version = "1.0", features = ["v4"] }
+
+# Seguridad/Autenticación (unificadas)
+jsonwebtoken = "9"
+argon2 = "0.5"
+totp-rs = { version = "5", features = ["gen_secret"] }
+
+# Base de datos
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Fechas (con serde para serialización)
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP Server middleware (NUEVO)
+tower-http = { version = "0.5", features = ["cors"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true

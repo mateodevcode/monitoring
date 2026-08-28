@@ -1,0 +1,55 @@
+# .github/workflows/deploy.yml
+name: Deploy WS Monitoring
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # 30 min es más que suficiente para 2 servicios Rust
+
+    steps:
+      - name: SSH Deploy to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+
+            echo "🚀 Iniciando despliegue del Socket System..."
+
+            # 1. Ir al directorio de trabajo en el VPS
+            cd /srv/infra/monitoring
+
+            echo "→ Descartando cambios locales no versionados..."
+            git reset --hard HEAD
+            git clean -fd
+
+            echo "→ Actualizando código desde GitHub..."
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "→ Construyendo servicios (Rust optimizado)..."
+            # Construimos solo lo que cambió. Docker cachea las capas.
+            docker compose build socket-core
+            docker compose build admin-agent
+
+            echo "→ Levantando contenedores..."
+            docker compose up -d --remove-orphans
+
+            echo "→ Limpiando imágenes viejas para ahorrar espacio en VPS..."
+            docker image prune -f
+
+            echo "→ Verificando que los contenedores estén corriendo..."
+            sleep 5
+            docker compose ps | grep "Up" || (echo "❌ Error: Algun contenedor no está corriendo" && exit 1)
+
+            echo "→ Estado final de los servicios:"
+            docker compose ps
+
+            echo "✅ ¡Despliegue completado con éxito!!"
