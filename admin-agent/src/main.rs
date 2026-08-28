@@ -46,7 +46,7 @@ struct EmitEventRequest {
 
 type DbConnection = Arc<Mutex<Connection>>;
 
-const AGENT_CLIENT_ID: &str = "rust-admin-agent-01";
+const AGENT_CLIENT_ID: &str = "admin-agent-01";
 const LISTEN_CHANNEL_NAME: &str = "admin-actions";
 const RESPONSE_CHANNEL_NAME: &str = "admin-events";
 const DASHBOARD_INTERVAL_SECS: u64 = 5;

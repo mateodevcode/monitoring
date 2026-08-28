@@ -1,4 +1,4 @@
-# rust-admin-agent/Dockerfile
+# admin-agent/Dockerfile
 FROM rust:1-alpine AS builder
 WORKDIR /app
 
@@ -15,9 +15,9 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates docker-cli curl iproute2
 
 WORKDIR /root/
-COPY --from=builder /app/target/release/rust-admin-agent .
+COPY --from=builder /app/target/release/admin-agent .
 
 # 👇 AGREGA ESTA LÍNEA: Copia el JSON al contenedor para que el agente pueda leerlo
 COPY monitored_sites.json .
 
-CMD ["./rust-admin-agent"]
+CMD ["./admin-agent"]

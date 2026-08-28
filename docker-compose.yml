@@ -4,7 +4,7 @@ services:
     build:
       context: ./socket-core
       dockerfile: Dockerfile
-    container_name: rust-socket-core
+    container_name: socket-core
     restart: unless-stopped
     # SIN "ports:" -> no habla con internet directo, solo dentro de Docker.
     # Si el frontend necesita WS, Nginx hace proxy hacia este nombre de servicio.
@@ -24,7 +24,7 @@ services:
     build:
       context: ./admin-agent
       dockerfile: Dockerfile
-    container_name: rust-admin-agent
+    container_name: admin-agent
     restart: unless-stopped
     env_file:
       - .env

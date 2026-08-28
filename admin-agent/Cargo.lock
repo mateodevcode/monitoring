@@ -9,6 +9,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "admin-agent"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "axum",
+ "chrono",
+ "dotenv",
+ "futures-util",
+ "jsonwebtoken",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tokio-tungstenite",
+ "totp-rs",
+ "tower-http 0.5.2",
+ "tower_governor",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "uuid",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1590,32 +1616,6 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
-]
-
-[[package]]
-name = "rust-admin-agent"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "axum",
- "chrono",
- "dotenv",
- "futures-util",
- "jsonwebtoken",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sysinfo",
- "tokio",
- "tokio-tungstenite",
- "totp-rs",
- "tower-http 0.5.2",
- "tower_governor",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "uuid",
 ]
 
 [[package]]
