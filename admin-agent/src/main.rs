@@ -251,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .with_state(auth_state.clone());
 
-    //  Rutas PROTEGIDAS (requieren JWT)
+    // 🛡️ Rutas PROTEGIDAS (requieren JWT)
     let protected_routes = Router::new()
         .route("/exec", post(exec_handler))
         .route("/kill", post(kill_handler))
@@ -263,8 +263,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .with_state(db_conn.clone());
 
-    // Router principal
-    let app = Router::new().merge(public_routes).merge(protected_routes);
+    // 🚀 Router principal: Anidamos TODO bajo el prefijo "/api"
+    // Esto convierte /auth/login en /api/auth/login, /exec en /api/exec, etc.
+    let app = Router::new()
+        .nest("/api", public_routes)
+        .nest("/api", protected_routes);
 
     // ==========================================
     // 6. INICIAR TAREAS EN BACKGROUND
