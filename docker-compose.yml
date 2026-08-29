@@ -6,7 +6,8 @@ services:
       dockerfile: Dockerfile
     container_name: socket-core
     restart: unless-stopped
-    # SIN "ports:" -> no habla con internet directo, solo dentro de Docker.
+    ports:
+      - "127.0.0.1:3005:3005"
     # Si el frontend necesita WS, Nginx hace proxy hacia este nombre de servicio.
     environment:
       - RUST_LOG=info
@@ -28,6 +29,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      - "127.0.0.1:8080:8080"
     environment:
       - RUST_LOG=info
       - CORE_WS_URL=ws://socket-core:3005/ws
@@ -38,15 +41,12 @@ services:
       - ./admin-agent-data:/app/data
       - /proc:/proc:ro
       - /sys:/sys:ro
-    # SIN "ports:" -> solo Nginx (que solo escucha en la IP de Tailscale
     # para este vhost) puede llegar a este contenedor. Ver Fase 5.
     networks:
       - central_network
     depends_on:
       socket-core:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:8080:8080"
 
 networks:
   central_network:
