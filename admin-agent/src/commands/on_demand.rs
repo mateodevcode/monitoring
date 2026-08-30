@@ -306,186 +306,227 @@ check redis-server Redis databases
 apk add --no-cache iproute2 curl grep awk whois coreutils util-linux > /dev/null 2>&1
 
 # ============================================
-# BLOQUE 1: SESIONES SSH (USUARIOS AUTENTICADOS)
+# WHITELIST DE USUARIOS E IPS CONOCIDAS
 # ============================================
 EXPECTED_USERS="root|admin|deploy|ubuntu"
+KNOWN_IPS="79.117.90.148|1.2.3.4"  # IPs confiables (puedes añadir más)
 
-# Obtener sesiones activas con w (únicas)
-w -hs 2>/dev/null | awk '
+# ============================================
+# 1. OBTENER IP DEL SERVIDOR
+# ============================================
+SERVER_IP=$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
+if [ -z "$SERVER_IP" ]; then
+    SERVER_IP="unknown"
+fi
+
+# ============================================
+# 2. SESIONES SSH ACTIVAS (usuarios autenticados)
+# ============================================
+# Usamos 'w' para obtener sesiones reales, y 'ss' para confirmar conexiones SSH
+SSH_SESSIONS_RAW=$(w -hs 2>/dev/null | awk '
 {
     user = $1;
     from = $3;
     login = $4;
     idle = $5;
+    # El resto es el comando (what)
     for (i=6; i<=NF; i++) {
         what = what " " $i;
     }
-    key = user "|" from;
-    if (!(key in seen)) {
-        seen[key] = 1;
-        print user "|" from "|" login "|" idle "|" what;
-    }
+    print user "|" from "|" login "|" idle "|" what;
     what = "";
-}' > /tmp/ssh_sessions.txt
+}')
 
-# Enriquecer sesiones SSH
-echo "=== SSH_SESSIONS ==="
-cat /tmp/ssh_sessions.txt | while IFS='|' read -r user from login idle what; do
-    if echo "$EXPECTED_USERS" | grep -q "$user"; then
-        user_status="EXPECTED"
+# También obtenemos conexiones SSH establecidas (para enriquecer)
+SSH_CONNECTIONS=$(ss -tn state established dport :22 2>/dev/null | awk '
+NR>1 {
+    split($5, peer, ":");
+    remote_ip = peer[1];
+    gsub(/[\[\]]/, "", remote_ip);
+    if (remote_ip !~ /^127\./ && remote_ip !~ /^10\./ && 
+        remote_ip !~ /^192\.168\./ && remote_ip !~ /^172\.(1[6-9]|2[0-9]|3[01])\./) {
+        print remote_ip;
+    }
+}' | sort -u)
+
+# Combinamos ambas fuentes (evitamos duplicados)
+SSH_IPS=$(echo -e "$SSH_SESSIONS_RAW" | awk -F'|' '{print $2}' | sort -u)
+SSH_IPS="$SSH_IPS\n$SSH_CONNECTIONS"
+SSH_IPS=$(echo "$SSH_IPS" | sort -u | grep -v '^$')
+
+# Generar sesiones SSH enriquecidas
+SSH_RESULT=""
+for ip in $SSH_IPS; do
+    # Buscar la sesión en 'w' (prioridad)
+    SESSION=$(echo "$SSH_SESSIONS_RAW" | grep "|$ip|" | head -1)
+    if [ -n "$SESSION" ]; then
+        USER=$(echo "$SESSION" | cut -d'|' -f1)
+        LOGIN=$(echo "$SESSION" | cut -d'|' -f3)
+        IDLE=$(echo "$SESSION" | cut -d'|' -f4)
+        WHAT=$(echo "$SESSION" | cut -d'|' -f5-)
     else
-        user_status="SUSPICIOUS"
+        # Si no está en 'w', es una conexión SSH sin sesión interactiva (p.ej. SCP)
+        USER="unknown"
+        LOGIN="N/A"
+        IDLE="N/A"
+        WHAT="ssh-connection"
     fi
-    
-    if echo "$from" | grep -qE '^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.'; then
-        ip_status="INTERNAL"
-    elif [ "$from" = "79.117.90.148" ] || [ "$from" = "1.2.3.4" ]; then
-        ip_status="KNOWN_EXTERNAL"
+
+    # Determinar estado del usuario
+    if echo "$EXPECTED_USERS" | grep -q "$USER"; then
+        USER_STATUS="EXPECTED"
     else
-        ip_status="EXTERNAL"
+        USER_STATUS="SUSPICIOUS"
     fi
-    
-    suspicious_cmd=0
-    if echo "$what" | grep -qE 'bash|nc |nohup|python -m|perl -e|ruby -e|sh -i|socat|telnet'; then
-        if [ "$user" != "root" ] && [ "$user" != "admin" ]; then
-            suspicious_cmd=1
+
+    # Determinar estado de IP
+    if echo "$ip" | grep -qE '^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.'; then
+        IP_STATUS="INTERNAL"
+    elif echo "$KNOWN_IPS" | grep -q "$ip"; then
+        IP_STATUS="KNOWN_EXTERNAL"
+    else
+        IP_STATUS="EXTERNAL"
+    fi
+
+    # Detectar comandos sospechosos (reverse shell)
+    SUSPICIOUS_CMD=0
+    if echo "$WHAT" | grep -qE 'bash|nc |nohup|python -m|perl -e|ruby -e|sh -i|socat|telnet'; then
+        if [ "$USER" != "root" ] && [ "$USER" != "admin" ]; then
+            SUSPICIOUS_CMD=1
         fi
     fi
-    
-    country="XX"
-    if [ "$ip_status" = "EXTERNAL" ] || [ "$ip_status" = "KNOWN_EXTERNAL" ]; then
-        country=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$from?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-        [ ${#country} -ne 2 ] && country="XX"
+
+    # Obtener país (solo para IPs externas)
+    COUNTRY="XX"
+    if [ "$IP_STATUS" = "EXTERNAL" ] || [ "$IP_STATUS" = "KNOWN_EXTERNAL" ]; then
+        COUNTRY=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+        if [ ${#COUNTRY} -ne 2 ]; then
+            COUNTRY="XX"
+        fi
     fi
-    
-    echo "${user}|${from}|${login}|${idle}|${what}|${user_status}|${ip_status}|${suspicious_cmd}|${country}"
+
+    # Construir línea para SSH
+    SSH_RESULT="$SSH_RESULT$USER|$ip|$LOGIN|$IDLE|$WHAT|$USER_STATUS|$IP_STATUS|$SUSPICIOUS_CMD|$COUNTRY\n"
 done
 
 # ============================================
-# BLOQUE 2: CONEXIONES WEB (PUERTO 443 y 80)
+# 3. CONEXIONES WEB (puerto 443 y 80)
 # ============================================
-echo "=== WEB_CONNECTIONS ==="
-# Filtramos conexiones establecidas a puertos 443 y 80, excluyendo IPs internas y agrupando por IP remota
-ss -tn state established 2>/dev/null | awk '
+# Usamos 'ss -tn' para conexiones establecidas en puertos web
+WEB_CONNECTIONS=$(ss -tn state established 2>/dev/null | awk '
 NR>1 {
-    split($4, local, ":");
-    split($5, peer, ":");
-    local_port = local[length(local)];
-    remote_ip = peer[1];
-    gsub(/[\[\]]/, "", remote_ip);
-    
-    # Solo puertos web
-    if (local_port != 443 && local_port != 80) next;
-    
+    local_addr = $4;
+    peer_addr = $5;
+
+    # Extraer puerto local
+    if (match(local_addr, /:[0-9]+$/)) {
+        local_port = substr(local_addr, RSTART+1) + 0;
+    } else {
+        next;
+    }
+
+    # Solo interesan puertos 80 y 443
+    if (local_port != 80 && local_port != 443) next;
+
+    # Extraer IP remota
+    sub(/:[0-9]+$/, "", peer_addr);
+    gsub(/[\[\]]/, "", peer_addr);
+    remote_ip = peer_addr;
+
     # Filtrar IPs privadas
     if (remote_ip ~ /^127\./) next;
     if (remote_ip ~ /^10\./) next;
     if (remote_ip ~ /^192\.168\./) next;
     if (remote_ip ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) next;
     if (remote_ip == "::1") next;
-    if (remote_ip ~ /^fd/) next;
-    if (remote_ip ~ /^fe80/) next;
-    
-    # Contar conexiones por IP remota y puerto local
+
+    # Contar conexiones por IP y puerto
     key = remote_ip "|" local_port;
     count[key]++;
+    ip_list[remote_ip] = 1;
 }
 END {
     for (key in count) {
-        split(key, arr, "|");
-        remote_ip = arr[1];
-        local_port = arr[2];
-        print remote_ip "|" local_port "|" count[key];
+        split(key, parts, "|");
+        ip = parts[1];
+        port = parts[2];
+        print ip "|" port "|" count[key];
     }
-}' | while IFS='|' read -r remote_ip port count; do
+}')
+
+# Enriquecer conexiones web con país
+WEB_RESULT=""
+for line in $WEB_CONNECTIONS; do
+    ip=$(echo "$line" | cut -d'|' -f1)
+    port=$(echo "$line" | cut -d'|' -f2)
+    count=$(echo "$line" | cut -d'|' -f3)
+
     # Obtener país
-    country=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$remote_ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-    [ ${#country} -ne 2 ] && country="XX"
-    
-    # Determinar estado (si es admin)
-    if [ "$remote_ip" = "79.117.90.148" ] || [ "$remote_ip" = "1.2.3.4" ]; then
-        status="ADMIN"
-    else
-        status="EXTERNAL"
+    COUNTRY=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+    if [ ${#COUNTRY} -ne 2 ]; then
+        COUNTRY="XX"
     fi
-    
-    echo "${remote_ip}|${port}|${count}|${country}|${status}"
+
+    WEB_RESULT="$WEB_RESULT$ip|$port|$count|$COUNTRY\n"
 done
 
 # ============================================
-# SI NO HAY DATOS, DEVOLVER VACÍO
+# 4. CONSTRUIR JSON FINAL
 # ============================================
-if [ ! -s /tmp/ssh_sessions.txt ] && [ -z "$(ss -tn state established 2>/dev/null | grep -E ':(443|80) ')" ]; then
-    echo "[]"
+# Escapar caracteres especiales para JSON
+escape_json() {
+    echo "$1" | sed 's/"/\\"/g' | sed 's/\\\\/\\\\\\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g'
+}
+
+# Generar JSON manualmente (más ligero que usar jq)
+JSON="{\"server_ip\":\"$SERVER_IP\",\"ssh_sessions\":["
+
+# Añadir sesiones SSH
+count=0
+if [ -n "$SSH_RESULT" ]; then
+    echo "$SSH_RESULT" | while IFS='|' read -r user from login idle what user_status ip_status suspicious_cmd country; do
+        if [ -z "$user" ]; then continue; fi
+        if [ $count -gt 0 ]; then JSON="$JSON,"; fi
+        JSON="$JSON{\"user\":\"$(escape_json "$user")\",\"from\":\"$(escape_json "$from")\",\"login\":\"$(escape_json "$login")\",\"idle\":\"$(escape_json "$idle")\",\"what\":\"$(escape_json "$what")\",\"user_status\":\"$(escape_json "$user_status")\",\"ip_status\":\"$(escape_json "$ip_status")\",\"suspicious_command\":$suspicious_cmd,\"country\":\"$(escape_json "$country")\"}"
+        count=$((count+1))
+    done
 fi
-            "#,
-        ])
-        .output();
+
+JSON="$JSON],\"web_connections\":["
+
+# Añadir conexiones web
+count=0
+if [ -n "$WEB_RESULT" ]; then
+    echo "$WEB_RESULT" | while IFS='|' read -r ip port count_conn country; do
+        if [ -z "$ip" ]; then continue; fi
+        if [ $count -gt 0 ]; then JSON="$JSON,"; fi
+        JSON="$JSON{\"peer_ip\":\"$(escape_json "$ip")\",\"port\":$port,\"count\":$count_conn,\"country\":\"$(escape_json "$country")\"}"
+        count=$((count+1))
+    done
+fi
+
+JSON="$JSON]}"
+
+echo "$JSON"
+                "#,
+            ])
+            .output();
 
         match output {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut ssh_sessions = Vec::new();
-                let mut web_connections = Vec::new();
-                let mut current_section = "";
-
-                for line in stdout.lines() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    if line == "[]" {
-                        continue;
-                    }
-
-                    if line.starts_with("=== SSH_SESSIONS ===") {
-                        current_section = "ssh";
-                        continue;
-                    } else if line.starts_with("=== WEB_CONNECTIONS ===") {
-                        current_section = "web";
-                        continue;
-                    }
-
-                    match current_section {
-                        "ssh" => {
-                            let parts: Vec<&str> = line.split('|').collect();
-                            if parts.len() == 9 {
-                                ssh_sessions.push(serde_json::json!({
-                                    "user": parts[0],
-                                    "from": parts[1],
-                                    "login": parts[2],
-                                    "idle": parts[3],
-                                    "what": parts[4],
-                                    "user_status": parts[5],
-                                    "ip_status": parts[6],
-                                    "suspicious_command": parts[7].trim() == "1",
-                                    "country": parts[8]
-                                }));
-                            }
-                        }
-                        "web" => {
-                            let parts: Vec<&str> = line.split('|').collect();
-                            if parts.len() == 5 {
-                                web_connections.push(serde_json::json!({
-                                    "peer_ip": parts[0],
-                                    "port": parts[1].parse::<u32>().unwrap_or(0),
-                                    "count": parts[2].parse::<u32>().unwrap_or(0),
-                                    "country": parts[3],
-                                    "status": parts[4]
-                                }));
-                            }
-                        }
-                        _ => {}
-                    }
+                // Si el JSON es vacío o solo contiene corchetes, devolver array vacío
+                if stdout.trim().is_empty() || stdout.trim() == "{}" {
+                    (
+                        true,
+                        "{\"server_ip\":\"unknown\",\"ssh_sessions\":[],\"web_connections\":[]}"
+                            .to_string(),
+                    )
+                } else {
+                    (true, stdout.to_string())
                 }
-
-                let response = serde_json::json!({
-                    "ssh_sessions": ssh_sessions,
-                    "web_connections": web_connections
-                });
-
-                (true, response.to_string())
             }
-            Err(e) => (false, format!("Error: {}", e)),
+            Err(e) => (false, format!("Error ejecutando radar de red: {}", e)),
         }
     } else if action == "set_admin_ip" {
         // Este comando se llama desde el frontend para marcar la IP propia
