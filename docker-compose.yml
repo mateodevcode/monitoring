@@ -46,6 +46,7 @@ services:
       - /var/log/wtmp:/var/log/wtmp:ro
     cap_add:
       - SYS_ADMIN
+      - SYS_PTRACE
     networks:
       - central_network
 

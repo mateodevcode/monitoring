@@ -12,7 +12,7 @@ COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates docker-cli curl iproute2
+RUN apk --no-cache add ca-certificates docker-cli curl iproute2 procps
 
 WORKDIR /root/
 COPY --from=builder /app/target/release/admin-agent .
