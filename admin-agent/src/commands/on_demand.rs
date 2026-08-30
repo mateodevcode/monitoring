@@ -506,45 +506,37 @@ build_json
 apk add --no-cache iproute2 curl grep awk whois coreutils util-linux > /dev/null 2>&1
 
 # ============================================
-# WHITELIST DE USUARIOS E IPS ESPERADAS
+# BLOQUE 1: SESIONES SSH (USUARIOS AUTENTICADOS)
 # ============================================
 EXPECTED_USERS="root|admin|deploy|ubuntu"
-EXPECTED_IPS="127.0.0.1|::1|10.0.0.0/8|192.168.0.0/16|172.16.0.0/12"
 
-# ============================================
-# 1. SESIONES ACTIVAS CON w (ÚNICAS por usuario/IP)
-# ============================================
+# Obtener sesiones activas con w (únicas)
 w -hs 2>/dev/null | awk '
 {
     user = $1;
     from = $3;
     login = $4;
     idle = $5;
-    # El resto es el comando (what)
     for (i=6; i<=NF; i++) {
         what = what " " $i;
     }
-    # Solo guardamos si no hemos visto este user+from antes (evitar duplicados)
     key = user "|" from;
     if (!(key in seen)) {
         seen[key] = 1;
         print user "|" from "|" login "|" idle "|" what;
     }
     what = "";
-}' > /tmp/sessions.txt
+}' > /tmp/ssh_sessions.txt
 
-# ============================================
-# 2. ENRIQUECER CON PAÍS Y ESTADO
-# ============================================
-cat /tmp/sessions.txt | while IFS='|' read -r user from login idle what; do
-    # Determinar estado del usuario
+# Enriquecer sesiones SSH
+echo "=== SSH_SESSIONS ==="
+cat /tmp/ssh_sessions.txt | while IFS='|' read -r user from login idle what; do
     if echo "$EXPECTED_USERS" | grep -q "$user"; then
         user_status="EXPECTED"
     else
         user_status="SUSPICIOUS"
     fi
     
-    # Determinar estado de IP
     if echo "$from" | grep -qE '^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.'; then
         ip_status="INTERNAL"
     elif [ "$from" = "79.117.90.148" ] || [ "$from" = "1.2.3.4" ]; then
@@ -553,7 +545,6 @@ cat /tmp/sessions.txt | while IFS='|' read -r user from login idle what; do
         ip_status="EXTERNAL"
     fi
     
-    # Detectar comandos sospechosos (reverse shell)
     suspicious_cmd=0
     if echo "$what" | grep -qE 'bash|nc |nohup|python -m|perl -e|ruby -e|sh -i|socat|telnet'; then
         if [ "$user" != "root" ] && [ "$user" != "admin" ]; then
@@ -561,24 +552,71 @@ cat /tmp/sessions.txt | while IFS='|' read -r user from login idle what; do
         fi
     fi
     
-    # Obtener país solo para IPs externas
     country="XX"
     if [ "$ip_status" = "EXTERNAL" ] || [ "$ip_status" = "KNOWN_EXTERNAL" ]; then
         country=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$from?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-        if [ ${#country} -ne 2 ]; then
-            country="XX"
-        fi
+        [ ${#country} -ne 2 ] && country="XX"
     fi
     
     echo "${user}|${from}|${login}|${idle}|${what}|${user_status}|${ip_status}|${suspicious_cmd}|${country}"
 done
 
 # ============================================
-# 3. SI NO HAY SESIONES, DEVOLVER ARRAY VACÍO
+# BLOQUE 2: CONEXIONES WEB (PUERTO 443 y 80)
 # ============================================
-if [ ! -s /tmp/sessions.txt ]; then
+echo "=== WEB_CONNECTIONS ==="
+# Filtramos conexiones establecidas a puertos 443 y 80, excluyendo IPs internas y agrupando por IP remota
+ss -tn state established 2>/dev/null | awk '
+NR>1 {
+    split($4, local, ":");
+    split($5, peer, ":");
+    local_port = local[length(local)];
+    remote_ip = peer[1];
+    gsub(/[\[\]]/, "", remote_ip);
+    
+    # Solo puertos web
+    if (local_port != 443 && local_port != 80) next;
+    
+    # Filtrar IPs privadas
+    if (remote_ip ~ /^127\./) next;
+    if (remote_ip ~ /^10\./) next;
+    if (remote_ip ~ /^192\.168\./) next;
+    if (remote_ip ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) next;
+    if (remote_ip == "::1") next;
+    if (remote_ip ~ /^fd/) next;
+    if (remote_ip ~ /^fe80/) next;
+    
+    # Contar conexiones por IP remota y puerto local
+    key = remote_ip "|" local_port;
+    count[key]++;
+}
+END {
+    for (key in count) {
+        split(key, arr, "|");
+        remote_ip = arr[1];
+        local_port = arr[2];
+        print remote_ip "|" local_port "|" count[key];
+    }
+}' | while IFS='|' read -r remote_ip port count; do
+    # Obtener país
+    country=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$remote_ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+    [ ${#country} -ne 2 ] && country="XX"
+    
+    # Determinar estado (si es admin)
+    if [ "$remote_ip" = "79.117.90.148" ] || [ "$remote_ip" = "1.2.3.4" ]; then
+        status="ADMIN"
+    else
+        status="EXTERNAL"
+    fi
+    
+    echo "${remote_ip}|${port}|${count}|${country}|${status}"
+done
+
+# ============================================
+# SI NO HAY DATOS, DEVOLVER VACÍO
+# ============================================
+if [ ! -s /tmp/ssh_sessions.txt ] && [ -z "$(ss -tn state established 2>/dev/null | grep -E ':(443|80) ')" ]; then
     echo "[]"
-    exit 0
 fi
             "#,
         ])
@@ -587,34 +625,65 @@ fi
         match output {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut sessions = Vec::new();
+                let mut ssh_sessions = Vec::new();
+                let mut web_connections = Vec::new();
+                let mut current_section = "";
 
                 for line in stdout.lines() {
-                    if line.trim().is_empty() || line == "[]" {
+                    if line.trim().is_empty() {
                         continue;
                     }
-                    let parts: Vec<&str> = line.split('|').collect();
-                    if parts.len() == 9 {
-                        sessions.push(serde_json::json!({
-                            "user": parts[0],
-                            "from": parts[1],
-                            "login": parts[2],
-                            "idle": parts[3],
-                            "what": parts[4],
-                            "user_status": parts[5],
-                            "ip_status": parts[6],
-                            "suspicious_command": parts[7].trim() == "1",
-                            "country": parts[8]
-                        }));
+                    if line == "[]" {
+                        continue;
+                    }
+
+                    if line.starts_with("=== SSH_SESSIONS ===") {
+                        current_section = "ssh";
+                        continue;
+                    } else if line.starts_with("=== WEB_CONNECTIONS ===") {
+                        current_section = "web";
+                        continue;
+                    }
+
+                    match current_section {
+                        "ssh" => {
+                            let parts: Vec<&str> = line.split('|').collect();
+                            if parts.len() == 9 {
+                                ssh_sessions.push(serde_json::json!({
+                                    "user": parts[0],
+                                    "from": parts[1],
+                                    "login": parts[2],
+                                    "idle": parts[3],
+                                    "what": parts[4],
+                                    "user_status": parts[5],
+                                    "ip_status": parts[6],
+                                    "suspicious_command": parts[7].trim() == "1",
+                                    "country": parts[8]
+                                }));
+                            }
+                        }
+                        "web" => {
+                            let parts: Vec<&str> = line.split('|').collect();
+                            if parts.len() == 5 {
+                                web_connections.push(serde_json::json!({
+                                    "peer_ip": parts[0],
+                                    "port": parts[1].parse::<u32>().unwrap_or(0),
+                                    "count": parts[2].parse::<u32>().unwrap_or(0),
+                                    "country": parts[3],
+                                    "status": parts[4]
+                                }));
+                            }
+                        }
+                        _ => {}
                     }
                 }
 
-                // Si no hay sesiones, devolver array vacío
-                if sessions.is_empty() {
-                    (true, "[]".to_string())
-                } else {
-                    (true, serde_json::json!({"sessions": sessions}).to_string())
-                }
+                let response = serde_json::json!({
+                    "ssh_sessions": ssh_sessions,
+                    "web_connections": web_connections
+                });
+
+                (true, response.to_string())
             }
             Err(e) => (false, format!("Error: {}", e)),
         }
