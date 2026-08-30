@@ -500,120 +500,206 @@ build_json
         (true, "NEED_DB_ACCESS".to_string()) // Placeholder, lo manejamos en main.rs
     } else if action == "get_active_connections" {
         let output = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "--net=host",
-            "--pid=host",
-            "-v",
-            "/proc:/proc:ro",
-            "alpine",
-            "sh",
-            "-c",
-            r#"
-apk add --no-cache iproute2 procps curl net-tools > /dev/null 2>&1
+            .args([
+                "run", "--rm", "--net=host", "-v", "/var/log:/host/var/log:ro", "alpine", "sh", "-c",
+                r#"
+apk add --no-cache iproute2 curl grep awk whois coreutils util-linux > /dev/null 2>&1
 
-SERVER_IPV4=$(curl -s --max-time 2 -4 ifconfig.me 2>/dev/null)
-[ -z "$SERVER_IPV4" ] && SERVER_IPV4="unknown"
+# ============================================
+# WHITELIST
+# ============================================
+EXPECTED_USERS="root|admin|deploy|ubuntu"
+KNOWN_IPS="79.117.90.148"  # Ajusta con tus IPs
 
-echo "SERVER_IPV4:$SERVER_IPV4"
+# ============================================
+# 1. IP DEL SERVIDOR
+# ============================================
+SERVER_IP=$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
+[ -z "$SERVER_IP" ] && SERVER_IP="unknown"
 
-netstat -tnp 2>/dev/null | grep ESTABLISHED | while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    
-    local_addr=$(echo "$line" | awk '{print $4}')
-    peer_addr=$(echo "$line" | awk '{print $5}')
-    pid_proc=$(echo "$line" | awk '{print $7}')
-    
-    [ -z "$local_addr" ] || [ -z "$peer_addr" ] && continue
-    
-    local_ip=$(echo "$local_addr" | cut -d: -f1)
-    local_port=$(echo "$local_addr" | cut -d: -f2)
-    
-    peer_ip=$(echo "$peer_addr" | cut -d: -f1)
-    peer_port=$(echo "$peer_addr" | cut -d: -f2)
-    
-    # Solo IPv4
-    if echo "$peer_ip" | grep -q ':'; then
-        continue
+# ============================================
+# 2. SESIONES SSH (usuarios autenticados)
+# ============================================
+SSH_RAW=$(w -hs 2>/dev/null | awk '{
+    user=$1; from=$3; login=$4; idle=$5;
+    for(i=6;i<=NF;i++) what=what" "$i;
+    print user "|" from "|" login "|" idle "|" what;
+    what="";
+}')
+SSH_IPS=$(echo "$SSH_RAW" | awk -F'|' '{print $2}' | sort -u)
+SSH_CONN_IPS=$(ss -tn state established dport :22 2>/dev/null | awk 'NR>1 {split($5,peer,":"); gsub(/[\[\]]/,"",peer[1]); print peer[1]}' | sort -u)
+ALL_SSH_IPS=$(echo -e "$SSH_IPS\n$SSH_CONN_IPS" | sort -u | grep -v '^$')
+
+SSH_SESSIONS=""
+for ip in $ALL_SSH_IPS; do
+    SESSION=$(echo "$SSH_RAW" | grep "|$ip|" | head -1)
+    if [ -n "$SESSION" ]; then
+        USER=$(echo "$SESSION" | cut -d'|' -f1)
+        LOGIN=$(echo "$SESSION" | cut -d'|' -f3)
+        IDLE=$(echo "$SESSION" | cut -d'|' -f4)
+        WHAT=$(echo "$SESSION" | cut -d'|' -f5-)
+    else
+        USER="unknown"
+        LOGIN="N/A"
+        IDLE="N/A"
+        WHAT="ssh-connection"
     fi
-    
-    # Filtrar IPs privadas
-    if echo "$peer_ip" | grep -qE '^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)'; then
-        continue
+
+    if echo "$EXPECTED_USERS" | grep -q "$USER"; then
+        USER_STATUS="EXPECTED"
+    else
+        USER_STATUS="SUSPICIOUS"
     fi
-    
-    # Extraer PID
-    pid=$(echo "$pid_proc" | cut -d/ -f1)
-    
-    # Si no hay PID, usar ss
-    if [ -z "$pid" ] || [ "$pid" = "-" ]; then
-        pid=$(ss -tnp state established 2>/dev/null | grep ":$peer_port " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+
+    if echo "$ip" | grep -qE '^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.'; then
+        IP_STATUS="INTERNAL"
+    elif echo "$KNOWN_IPS" | grep -q "$ip"; then
+        IP_STATUS="KNOWN_EXTERNAL"
+    else
+        IP_STATUS="EXTERNAL"
     fi
-    
-    [ -z "$pid" ] && pid=0
-    
-    # Consultar país
-    country=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$peer_ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-    [ ${#country} -ne 2 ] && country="XX"
-    
-    echo "CONN:$local_ip|$local_port|$peer_ip|$peer_port|$pid|$country"
+
+    SUSPICIOUS_CMD=0
+    if echo "$WHAT" | grep -qE 'bash|nc |nohup|python -m|perl -e|ruby -e|sh -i|socat|telnet'; then
+        if [ "$USER" != "root" ] && [ "$USER" != "admin" ]; then
+            SUSPICIOUS_CMD=1
+        fi
+    fi
+
+    COUNTRY="XX"
+    if [ "$IP_STATUS" = "EXTERNAL" ] || [ "$IP_STATUS" = "KNOWN_EXTERNAL" ]; then
+        COUNTRY=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+        [ ${#COUNTRY} -ne 2 ] && COUNTRY="XX"
+    fi
+
+    SSH_SESSIONS="${SSH_SESSIONS}${USER}|${ip}|${LOGIN}|${IDLE}|${WHAT}|${USER_STATUS}|${IP_STATUS}|${SUSPICIOUS_CMD}|${COUNTRY}\n"
 done
-"#,
-        ])
-        .output();
+
+# ============================================
+# 3. CONEXIONES WEB (puertos 80 y 443)
+# ============================================
+WEB_RAW=$(ss -tn state established 2>/dev/null | awk '
+NR>1 {
+    split($4, local, ":");
+    local_port = local[length(local)];
+    if (local_port != 80 && local_port != 443) next;
+    split($5, peer, ":");
+    remote_ip = peer[1];
+    gsub(/[\[\]]/, "", remote_ip);
+    if (remote_ip ~ /^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.|::1/) next;
+    key = remote_ip "|" local_port;
+    count[key]++;
+}
+END {
+    for (k in count) {
+        split(k, arr, "|");
+        print arr[1] "|" arr[2] "|" count[k];
+    }
+}')
+
+WEB_SESSIONS=""
+for line in $WEB_RAW; do
+    ip=$(echo "$line" | cut -d'|' -f1)
+    port=$(echo "$line" | cut -d'|' -f2)
+    cnt=$(echo "$line" | cut -d'|' -f3)
+    COUNTRY=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+    [ ${#COUNTRY} -ne 2 ] && COUNTRY="XX"
+    WEB_SESSIONS="${WEB_SESSIONS}${ip}|${port}|${cnt}|${COUNTRY}\n"
+done
+
+# ============================================
+# 4. GENERAR JSON FINAL (usando jq si existe, o manual)
+# ============================================
+# Intentar usar jq si está instalado
+if command -v jq >/dev/null 2>&1; then
+    # Construir arrays con jq
+    SSH_JSON="[]"
+    if [ -n "$SSH_SESSIONS" ]; then
+        SSH_JSON=$(echo "$SSH_SESSIONS" | while IFS='|' read -r user from login idle what user_status ip_status suspicious_cmd country; do
+            [ -z "$user" ] && continue
+            jq -n \
+                --arg user "$user" \
+                --arg from "$from" \
+                --arg login "$login" \
+                --arg idle "$idle" \
+                --arg what "$what" \
+                --arg user_status "$user_status" \
+                --arg ip_status "$ip_status" \
+                --argjson suspicious_cmd "$suspicious_cmd" \
+                --arg country "$country" \
+                '{user:$user, from:$from, login:$login, idle:$idle, what:$what, user_status:$user_status, ip_status:$ip_status, suspicious_command:$suspicious_cmd, country:$country}'
+        done | jq -s '.')
+    fi
+
+    WEB_JSON="[]"
+    if [ -n "$WEB_SESSIONS" ]; then
+        WEB_JSON=$(echo "$WEB_SESSIONS" | while IFS='|' read -r ip port cnt country; do
+            [ -z "$ip" ] && continue
+            jq -n \
+                --arg peer_ip "$ip" \
+                --argjson port "$port" \
+                --argjson count "$cnt" \
+                --arg country "$country" \
+                '{peer_ip:$peer_ip, port:$port, count:$count, country:$country}'
+        done | jq -s '.')
+    fi
+
+    jq -n \
+        --arg server_ip "$SERVER_IP" \
+        --argjson ssh_sessions "$SSH_JSON" \
+        --argjson web_connections "$WEB_JSON" \
+        '{server_ip:$server_ip, ssh_sessions:$ssh_sessions, web_connections:$web_connections}'
+else
+    # Fallback: construir JSON manualmente (solo para casos sin jq)
+    echo "{\"server_ip\":\"$SERVER_IP\",\"ssh_sessions\":["
+    first=true
+    if [ -n "$SSH_SESSIONS" ]; then
+        echo "$SSH_SESSIONS" | while IFS='|' read -r user from login idle what user_status ip_status suspicious_cmd country; do
+            [ -z "$user" ] && continue
+            if [ "$first" = true ]; then first=false; else echo ","; fi
+            # Escapar caracteres especiales para JSON
+            user=$(echo "$user" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            from=$(echo "$from" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            login=$(echo "$login" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            idle=$(echo "$idle" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            what=$(echo "$what" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            user_status=$(echo "$user_status" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            ip_status=$(echo "$ip_status" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            country=$(echo "$country" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            echo "{\"user\":\"$user\",\"from\":\"$from\",\"login\":\"$login\",\"idle\":\"$idle\",\"what\":\"$what\",\"user_status\":\"$user_status\",\"ip_status\":\"$ip_status\",\"suspicious_command\":$suspicious_cmd,\"country\":\"$country\"}"
+        done
+    fi
+    echo "],\"web_connections\":["
+    first=true
+    if [ -n "$WEB_SESSIONS" ]; then
+        echo "$WEB_SESSIONS" | while IFS='|' read -r ip port cnt country; do
+            [ -z "$ip" ] && continue
+            if [ "$first" = true ]; then first=false; else echo ","; fi
+            ip=$(echo "$ip" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            country=$(echo "$country" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            echo "{\"peer_ip\":\"$ip\",\"port\":$port,\"count\":$cnt,\"country\":\"$country\"}"
+        done
+    fi
+    echo "]}"
+fi
+                "#,
+            ])
+            .output();
 
         match output {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut server_ipv4 = "unknown".to_string();
-                let mut connections = Vec::new();
-
-                for line in stdout.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    if line.starts_with("SERVER_IPV4:") {
-                        server_ipv4 = line[12..].to_string();
-                        continue;
-                    }
-
-                    if line.starts_with("CONN:") {
-                        let parts: Vec<&str> = line[5..].split('|').collect();
-                        if parts.len() == 6 {
-                            let local_port = parts[1].parse::<u32>().unwrap_or(0);
-                            let peer_port = parts[3].parse::<u32>().unwrap_or(0);
-                            let pid = parts[4].parse::<u32>().unwrap_or(0);
-
-                            if local_port > 0 && local_port < 32768 && peer_port > 0 {
-                                connections.push(serde_json::json!({
-                                    "local_ip": parts[0],
-                                    "local_port": local_port,
-                                    "peer_ip": parts[2],
-                                    "peer_port": peer_port,
-                                    "pid": pid,
-                                    "country": parts[5].to_uppercase()
-                                }));
-                            }
-                        }
-                    }
+                if stdout.trim().is_empty() || stdout.trim() == "{}" {
+                    (
+                        true,
+                        r#"{"server_ip":"unknown","ssh_sessions":[],"web_connections":[]}"#
+                            .to_string(),
+                    )
+                } else {
+                    (true, stdout.to_string())
                 }
-
-                (
-                    true,
-                    serde_json::json!({
-                        "server_ip": server_ipv4,
-                        "connections": connections
-                    })
-                    .to_string(),
-                )
             }
-            Err(e) => {
-                eprintln!("Error ejecutando docker para get_active_connections: {}", e);
-                (false, format!("Error ejecutando docker: {}", e))
-            }
+            Err(e) => (false, format!("Error: {}", e)),
         }
     } else if let Some(&(_, program, args)) =
         ALLOWED_COMMANDS.iter().find(|&&(cmd, _, _)| cmd == action)
