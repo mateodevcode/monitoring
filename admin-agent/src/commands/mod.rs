@@ -74,5 +74,6 @@ pub const DYNAMIC_ACTIONS: &[&str] = &[
     "cpu_info",
     "docker_info",
     "uptime_check",
+    "get_active_connections",
     // "network_threats",
 ];
