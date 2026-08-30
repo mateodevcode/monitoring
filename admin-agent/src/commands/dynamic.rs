@@ -68,15 +68,6 @@ pub fn execute_action(action: &str, _payload: &Value) -> (bool, String) {
             });
             (true, response.to_string())
         }
-        "cpu_info" => {
-            let sys = System::new_all();
-            let cpu_usage = sys.global_cpu_usage() as f32;
-            (true, json!({
-                "percent": (cpu_usage.round() as u64).min(100),
-                "cores": sys.cpus().len(),
-                "brand": sys.cpus().first().map(|c| c.brand().to_string()).unwrap_or_else(|| "Unknown".to_string())
-            }).to_string())
-        }
         "docker_info" => {
             let output = std::process::Command::new("docker")
                 .args(["ps", "-a", "--format", "{{json .}}"])
