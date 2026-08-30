@@ -543,64 +543,128 @@ build_json
         // ---------------------------------------------------------
         // PASO 1: Sesiones SSH vía `w` — sin cambios, ya es lo correcto
         // ---------------------------------------------------------
-        let w_output = if std::path::Path::new("/usr/bin/nsenter").exists() {
-            Command::new("/usr/bin/")
-                .args(["-t", "1", "-m", "-u", "-i", "-n", "-p", "/usr/bin/w", "-hs"])
-                .output()
-        } else {
-            Command::new("/usr/bin/w").arg("-hs").output()
-        };
+        // ---------------------------------------------------------
+        // PASO 1: Sesiones SSH — parseo nativo de /var/run/utmp
+        // Reemplaza la llamada a `w`, que fallaba por incompatibilidad
+        // de struct entre glibc (host) y musl (contenedor Alpine).
+        // ---------------------------------------------------------
+        const UTMP_RECORD_SIZE: usize = 384;
+        const USER_PROCESS: i16 = 7;
 
-        if let Ok(out) = w_output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 6 {
-                    let user = parts[0];
-                    let from = parts[2];
-                    let login = parts[3];
-                    let idle = parts[4];
-                    let what = parts[5..].join(" ");
-
-                    let user_status = if expected_users.contains(&user) {
-                        "EXPECTED"
-                    } else {
-                        "SUSPICIOUS"
-                    };
-
-                    let ip_status = if is_private_ip(from) {
-                        "INTERNAL"
-                    } else if known_ips.contains(&from) {
-                        "KNOWN_EXTERNAL"
-                    } else {
-                        "EXTERNAL"
-                    };
-
-                    let mut suspicious_cmd = false;
-                    if user_status == "SUSPICIOUS" {
-                        suspicious_cmd = suspicious_patterns
-                            .iter()
-                            .any(|&pattern| what.contains(pattern));
-                    }
-
-                    if ip_status != "INTERNAL" {
-                        external_ips_to_geolocate.push(from.to_string());
-                    }
-
-                    ssh_sessions.push(serde_json::json!({
-                        "user": user,
-                        "from": from,
-                        "login": login,
-                        "idle": idle,
-                        "what": what,
-                        "user_status": user_status,
-                        "ip_status": ip_status,
-                        "suspicious_command": suspicious_cmd,
-                        "country": "XX"
-                    }));
-                }
-            }
+        struct UtmpRecord {
+            ut_type: i16,
+            user: String,
+            line: String,
+            host: String,
+            tv_sec: i64,
         }
+
+        fn parse_utmp(path: &str) -> Vec<UtmpRecord> {
+            let mut records = Vec::new();
+            let data = match std::fs::read(path) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("❌ No se pudo leer {}: {:?}", path, e);
+                    return records;
+                }
+            };
+
+            if data.len() % UTMP_RECORD_SIZE != 0 {
+                tracing::error!(
+                    "⚠️ {} tiene tamaño inesperado ({} bytes, no es múltiplo de {})",
+                    path,
+                    data.len(),
+                    UTMP_RECORD_SIZE
+                );
+            }
+
+            for chunk in data.chunks_exact(UTMP_RECORD_SIZE) {
+                let ut_type = i16::from_ne_bytes([chunk[0], chunk[1]]);
+
+                let line = cstr_from_bytes(&chunk[8..40]);
+                let user = cstr_from_bytes(&chunk[44..76]);
+                let host = cstr_from_bytes(&chunk[76..332]);
+
+                // ut_tv: { sec: i32, usec: i32 } a partir del offset 340
+                let tv_sec =
+                    i32::from_ne_bytes([chunk[340], chunk[341], chunk[342], chunk[343]]) as i64;
+
+                records.push(UtmpRecord {
+                    ut_type,
+                    user,
+                    line,
+                    host,
+                    tv_sec,
+                });
+            }
+
+            records
+        }
+
+        /// Los campos de utmp son buffers de tamaño fijo, rellenos con \0.
+        /// Cortamos en el primer \0 y descartamos bytes no-UTF8 inválidos.
+        fn cstr_from_bytes(bytes: &[u8]) -> String {
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            String::from_utf8_lossy(&bytes[..end]).trim().to_string()
+        }
+
+        let utmp_records = parse_utmp("/var/run/utmp");
+        tracing::info!(
+            "📊 /var/run/utmp -> {} registros totales",
+            utmp_records.len()
+        );
+
+        for rec in &utmp_records {
+            if rec.ut_type != USER_PROCESS || rec.user.is_empty() {
+                continue;
+            }
+
+            // ut_host trae la IP/hostname de origen para sesiones remotas.
+            // Si está vacío, es una sesión local (consola/tty directa).
+            let from = if rec.host.is_empty() {
+                "local".to_string()
+            } else {
+                rec.host.clone()
+            };
+
+            let user_status = if expected_users.contains(&rec.user.as_str()) {
+                "EXPECTED"
+            } else {
+                "SUSPICIOUS"
+            };
+
+            let ip_status = if from == "local" {
+                "INTERNAL"
+            } else if is_private_ip(&from) {
+                "INTERNAL"
+            } else if known_ips.contains(&from.as_str()) {
+                "KNOWN_EXTERNAL"
+            } else {
+                "EXTERNAL"
+            };
+
+            if ip_status != "INTERNAL" {
+                external_ips_to_geolocate.push(from.clone());
+            }
+
+            let login_time = chrono::DateTime::from_timestamp(rec.tv_sec, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            ssh_sessions.push(serde_json::json!({
+                "user": rec.user,
+                "from": from,
+                "login": login_time,
+                "idle": "n/a",   // requiere acceso a /dev, pendiente si se necesita
+                "what": rec.line, // por ahora mostramos la tty; el comando en curso queda pendiente
+                "user_status": user_status,
+                "ip_status": ip_status,
+                "suspicious_command": false, // sin `what` real no podemos evaluar patrones sospechosos aún
+                "country": "XX"
+            }));
+        }
+
+        tracing::info!("📊 ssh_sessions final: {} sesiones", ssh_sessions.len());
 
         // ---------------------------------------------------------
         // PASO 2: Conexiones web — NATIVO, sin spawnear `ss`
