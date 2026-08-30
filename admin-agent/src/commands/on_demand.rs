@@ -499,194 +499,231 @@ build_json
         // Similar, necesitamos acceso a la DB
         (true, "NEED_DB_ACCESS".to_string()) // Placeholder, lo manejamos en main.rs
     } else if action == "get_active_connections" {
-        let output = std::process::Command::new("docker")
-        .args([
-            "run", "--rm", "--net=host", "-v", "/var/log:/host/var/log:ro", "alpine", "sh", "-c",
-            r#"
-apk add --no-cache iproute2 curl grep awk whois coreutils util-linux > /dev/null 2>&1
+        use std::collections::HashMap;
+        use std::process::Command;
+        use std::time::Duration;
 
-# ============================================
-# BLOQUE 1: SESIONES SSH (USUARIOS AUTENTICADOS)
-# ============================================
-EXPECTED_USERS="root|admin|deploy|ubuntu"
+        // Helpers
+        let is_private_ip = |ip: &str| -> bool {
+            ip.starts_with("127.")
+                || ip.starts_with("10.")
+                || ip.starts_with("192.168.")
+                || ip.starts_with("172.16.")
+                || ip.starts_with("172.17.")
+                || ip.starts_with("172.18.")
+                || ip.starts_with("172.19.")
+                || ip.starts_with("172.20.")
+                || ip.starts_with("172.21.")
+                || ip.starts_with("172.22.")
+                || ip.starts_with("172.23.")
+                || ip.starts_with("172.24.")
+                || ip.starts_with("172.25.")
+                || ip.starts_with("172.26.")
+                || ip.starts_with("172.27.")
+                || ip.starts_with("172.28.")
+                || ip.starts_with("172.29.")
+                || ip.starts_with("172.30.")
+                || ip.starts_with("172.31.")
+                || ip == "::1"
+                || ip.starts_with("fd")
+                || ip.starts_with("fe80")
+        };
 
-# Obtener sesiones activas con w (únicas)
-w -hs 2>/dev/null | awk '
-{
-    user = $1;
-    from = $3;
-    login = $4;
-    idle = $5;
-    for (i=6; i<=NF; i++) {
-        what = what " " $i;
-    }
-    key = user "|" from;
-    if (!(key in seen)) {
-        seen[key] = 1;
-        print user "|" from "|" login "|" idle "|" what;
-    }
-    what = "";
-}' > /tmp/ssh_sessions.txt
+        let expected_users = ["root", "admin", "deploy", "ubuntu"];
+        let known_ips = ["79.117.90.148", "1.2.3.4"]; // Ajusta con tus IPs reales
+        let suspicious_patterns = [
+            "bash", "nc ", "nohup", "python", "perl", "sh -i", "socat", "telnet",
+        ];
 
-# Enriquecer sesiones SSH
-echo "=== SSH_SESSIONS ==="
-cat /tmp/ssh_sessions.txt | while IFS='|' read -r user from login idle what; do
-    if echo "$EXPECTED_USERS" | grep -q "$user"; then
-        user_status="EXPECTED"
-    else
-        user_status="SUSPICIOUS"
-    fi
-    
-    if echo "$from" | grep -qE '^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.'; then
-        ip_status="INTERNAL"
-    elif [ "$from" = "79.117.90.148" ] || [ "$from" = "1.2.3.4" ]; then
-        ip_status="KNOWN_EXTERNAL"
-    else
-        ip_status="EXTERNAL"
-    fi
-    
-    suspicious_cmd=0
-    if echo "$what" | grep -qE 'bash|nc |nohup|python -m|perl -e|ruby -e|sh -i|socat|telnet'; then
-        if [ "$user" != "root" ] && [ "$user" != "admin" ]; then
-            suspicious_cmd=1
-        fi
-    fi
-    
-    country="XX"
-    if [ "$ip_status" = "EXTERNAL" ] || [ "$ip_status" = "KNOWN_EXTERNAL" ]; then
-        country=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$from?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-        [ ${#country} -ne 2 ] && country="XX"
-    fi
-    
-    echo "${user}|${from}|${login}|${idle}|${what}|${user_status}|${ip_status}|${suspicious_cmd}|${country}"
-done
+        let mut ssh_sessions = Vec::new();
+        let mut web_connections_map: HashMap<String, (u32, u32)> = HashMap::new();
+        let mut external_ips_to_geolocate = Vec::new();
 
-# ============================================
-# BLOQUE 2: CONEXIONES WEB (PUERTO 443 y 80)
-# ============================================
-echo "=== WEB_CONNECTIONS ==="
-# Filtramos conexiones establecidas a puertos 443 y 80, excluyendo IPs internas y agrupando por IP remota
-ss -tn state established 2>/dev/null | awk '
-NR>1 {
-    split($4, local, ":");
-    split($5, peer, ":");
-    local_port = local[length(local)];
-    remote_ip = peer[1];
-    gsub(/[\[\]]/, "", remote_ip);
-    
-    # Solo puertos web
-    if (local_port != 443 && local_port != 80) next;
-    
-    # Filtrar IPs privadas
-    if (remote_ip ~ /^127\./) next;
-    if (remote_ip ~ /^10\./) next;
-    if (remote_ip ~ /^192\.168\./) next;
-    if (remote_ip ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) next;
-    if (remote_ip == "::1") next;
-    if (remote_ip ~ /^fd/) next;
-    if (remote_ip ~ /^fe80/) next;
-    
-    # Contar conexiones por IP remota y puerto local
-    key = remote_ip "|" local_port;
-    count[key]++;
-}
-END {
-    for (key in count) {
-        split(key, arr, "|");
-        remote_ip = arr[1];
-        local_port = arr[2];
-        print remote_ip "|" local_port "|" count[key];
-    }
-}' | while IFS='|' read -r remote_ip port count; do
-    # Obtener país
-    country=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$remote_ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-    [ ${#country} -ne 2 ] && country="XX"
-    
-    # Determinar estado (si es admin)
-    if [ "$remote_ip" = "79.117.90.148" ] || [ "$remote_ip" = "1.2.3.4" ]; then
-        status="ADMIN"
-    else
-        status="EXTERNAL"
-    fi
-    
-    echo "${remote_ip}|${port}|${count}|${country}|${status}"
-done
+        // ---------------------------------------------------------
+        // PASO 1: Obtener sesiones SSH (w) - SÍNCRONO
+        // ---------------------------------------------------------
+        let w_output = if std::path::Path::new("/usr/bin/nsenter").exists() {
+            Command::new("/usr/bin/nsenter")
+                .args(["-t", "1", "-m", "-u", "-i", "-n", "-p", "/usr/bin/w", "-hs"])
+                .output()
+        } else {
+            Command::new("/usr/bin/w").arg("-hs").output()
+        };
 
-# ============================================
-# SI NO HAY DATOS, DEVOLVER VACÍO
-# ============================================
-if [ ! -s /tmp/ssh_sessions.txt ] && [ -z "$(ss -tn state established 2>/dev/null | grep -E ':(443|80) ')" ]; then
-    echo "[]"
-fi
-            "#,
-        ])
-        .output();
+        if let Ok(out) = w_output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 6 {
+                    let user = parts[0];
+                    let from = parts[2];
+                    let login = parts[3];
+                    let idle = parts[4];
+                    let what = parts[5..].join(" ");
 
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut ssh_sessions = Vec::new();
-                let mut web_connections = Vec::new();
-                let mut current_section = "";
+                    let user_status = if expected_users.contains(&user) {
+                        "EXPECTED"
+                    } else {
+                        "SUSPICIOUS"
+                    };
 
-                for line in stdout.lines() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    if line == "[]" {
-                        continue;
+                    let ip_status = if is_private_ip(from) {
+                        "INTERNAL"
+                    } else if known_ips.contains(&from) {
+                        "KNOWN_EXTERNAL"
+                    } else {
+                        "EXTERNAL"
+                    };
+
+                    let mut suspicious_cmd = false;
+                    if user_status == "SUSPICIOUS" {
+                        suspicious_cmd = suspicious_patterns
+                            .iter()
+                            .any(|&pattern| what.contains(pattern));
                     }
 
-                    if line.starts_with("=== SSH_SESSIONS ===") {
-                        current_section = "ssh";
-                        continue;
-                    } else if line.starts_with("=== WEB_CONNECTIONS ===") {
-                        current_section = "web";
-                        continue;
+                    if ip_status != "INTERNAL" {
+                        external_ips_to_geolocate.push(from.to_string());
                     }
 
-                    match current_section {
-                        "ssh" => {
-                            let parts: Vec<&str> = line.split('|').collect();
-                            if parts.len() == 9 {
-                                ssh_sessions.push(serde_json::json!({
-                                    "user": parts[0],
-                                    "from": parts[1],
-                                    "login": parts[2],
-                                    "idle": parts[3],
-                                    "what": parts[4],
-                                    "user_status": parts[5],
-                                    "ip_status": parts[6],
-                                    "suspicious_command": parts[7].trim() == "1",
-                                    "country": parts[8]
-                                }));
-                            }
+                    ssh_sessions.push(serde_json::json!({
+                        "user": user,
+                        "from": from,
+                        "login": login,
+                        "idle": idle,
+                        "what": what,
+                        "user_status": user_status,
+                        "ip_status": ip_status,
+                        "suspicious_command": suspicious_cmd,
+                        "country": "XX" // Se actualiza en el Paso 3
+                    }));
+                }
+            }
+        }
+
+        // ---------------------------------------------------------
+        // PASO 2: Obtener conexiones Web (ss) - SÍNCRONO
+        // ---------------------------------------------------------
+        let ss_output = if std::path::Path::new("/usr/bin/nsenter").exists() {
+            Command::new("/usr/bin/nsenter")
+                .args([
+                    "-t",
+                    "1",
+                    "-n",
+                    "/usr/bin/ss",
+                    "-tn",
+                    "state",
+                    "established",
+                ])
+                .output()
+        } else {
+            Command::new("/usr/bin/ss")
+                .args(["-tn", "state", "established"])
+                .output()
+        };
+
+        if let Ok(out) = ss_output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines().skip(1) {
+                // Saltar header
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 5 {
+                    let local_addr = parts[3];
+                    let peer_addr = parts[4];
+
+                    let local_port_str = local_addr.split(':').last().unwrap_or("0");
+                    let local_port: u32 = local_port_str.parse().unwrap_or(0);
+
+                    if (local_port == 80 || local_port == 443) && !peer_addr.contains('[') {
+                        let peer_ip = peer_addr.split(':').next().unwrap_or("");
+
+                        if !is_private_ip(peer_ip) {
+                            let key = format!("{}|{}", peer_ip, local_port);
+                            let entry = web_connections_map.entry(key).or_insert((local_port, 0));
+                            entry.1 += 1; // Incrementar contador
+                            external_ips_to_geolocate.push(peer_ip.to_string());
                         }
-                        "web" => {
-                            let parts: Vec<&str> = line.split('|').collect();
-                            if parts.len() == 5 {
-                                web_connections.push(serde_json::json!({
-                                    "peer_ip": parts[0],
-                                    "port": parts[1].parse::<u32>().unwrap_or(0),
-                                    "count": parts[2].parse::<u32>().unwrap_or(0),
-                                    "country": parts[3],
-                                    "status": parts[4]
-                                }));
-                            }
-                        }
-                        _ => {}
                     }
                 }
-
-                let response = serde_json::json!({
-                    "ssh_sessions": ssh_sessions,
-                    "web_connections": web_connections
-                });
-
-                (true, response.to_string())
             }
-            Err(e) => (false, format!("Error: {}", e)),
         }
+
+        // ---------------------------------------------------------
+        // PASO 3: Geolocalización SÍNCRONA (con timeout de 1s)
+        // ---------------------------------------------------------
+        external_ips_to_geolocate.sort();
+        external_ips_to_geolocate.dedup(); // Eliminar duplicados
+
+        // Cliente con timeout para que no se congele si ip-api tarda
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap_or_default();
+
+        let mut geo_results = HashMap::new();
+        for ip in &external_ips_to_geolocate {
+            let url = format!("http://ip-api.com/csv/{}?fields=countryCode", ip);
+            if let Ok(resp) = client.get(&url).send() {
+                if let Ok(text) = resp.text() {
+                    let country = text.trim().to_uppercase();
+                    geo_results.insert(
+                        ip.clone(),
+                        if country.len() == 2 {
+                            country
+                        } else {
+                            "XX".to_string()
+                        },
+                    );
+                }
+            } else {
+                geo_results.insert(ip.clone(), "XX".to_string());
+            }
+        }
+
+        // ---------------------------------------------------------
+        // PASO 4: Ensamblar respuesta final
+        // ---------------------------------------------------------
+        for session in &mut ssh_sessions {
+            if let Some(ip) = session["from"].as_str() {
+                if let Some(country) = geo_results.get(ip) {
+                    session["country"] = serde_json::Value::String(country.clone());
+                }
+            }
+        }
+
+        let mut final_web_connections = Vec::new();
+        for (key, (port, count)) in web_connections_map {
+            let ip = key.split('|').next().unwrap_or("");
+            let country = geo_results
+                .get(ip)
+                .cloned()
+                .unwrap_or_else(|| "XX".to_string());
+            let status = if known_ips.contains(&ip) {
+                "ADMIN"
+            } else {
+                "EXTERNAL"
+            };
+
+            final_web_connections.push(serde_json::json!({
+                "peer_ip": ip,
+                "port": port,
+                "count": count,
+                "country": country,
+                "status": status
+            }));
+        }
+
+        // Ordenar conexiones web por cantidad (las más activas primero)
+        final_web_connections.sort_by(|a, b| b["count"].as_u64().cmp(&a["count"].as_u64()));
+
+        let response = serde_json::json!({
+            "action": "get_active_connections",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "ssh_sessions": ssh_sessions,
+            "web_connections": final_web_connections
+        });
+
+        (true, response.to_string())
     } else if let Some(&(_, program, args)) =
         ALLOWED_COMMANDS.iter().find(|&&(cmd, _, _)| cmd == action)
     {

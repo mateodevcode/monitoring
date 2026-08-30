@@ -41,7 +41,9 @@ services:
       - ./admin-agent-data:/app/data
       - /proc:/proc:ro
       - /sys:/sys:ro
-    # para este vhost) puede llegar a este contenedor. Ver Fase 5.
+        # --- AGREGAR ESTAS DOS LÍNEAS ---
+      - /var/run/utmp:/var/run/utmp:ro
+      - /var/log/wtmp:/var/log/wtmp:ro
     networks:
       - central_network
     depends_on:
