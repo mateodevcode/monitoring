@@ -14,6 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -182,6 +183,88 @@ async fn publish_to_core(
     }
 }
 
+fn calculate_docker_delta(
+    last: &Option<serde_json::Value>,
+    current: &serde_json::Value,
+) -> serde_json::Value {
+    use std::collections::HashMap;
+
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+
+    // Obtener arrays de contenedores
+    let current_containers = current["containers"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|c| {
+            let name = c["name"].as_str().unwrap_or("unknown");
+            Some((name.to_string(), c.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let last_containers = if let Some(last_val) = last {
+        last_val["containers"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|c| {
+                let name = c["name"].as_str().unwrap_or("unknown");
+                Some((name.to_string(), c.clone()))
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+
+    // Detectar AGREGADOS y CAMBIOS
+    for (name, current_container) in &current_containers {
+        if let Some(last_container) = last_containers.get(name) {
+            // Comparar status
+            let current_status = current_container["status"].as_str().unwrap_or("");
+            let last_status = last_container["status"].as_str().unwrap_or("");
+
+            if current_status != last_status {
+                changed.push(json!({
+                    "name": name,
+                    "status_before": last_status,
+                    "status_after": current_status,
+                    "size": current_container["size"].as_str().unwrap_or("")
+                }));
+            }
+        } else {
+            // NUEVO contenedor
+            added.push(json!({
+                "name": name,
+                "status": current_container["status"].as_str().unwrap_or(""),
+                "size": current_container["size"].as_str().unwrap_or(""),
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            }));
+
+            tracing::warn!("🚨 NUEVO CONTENEDOR DETECTADO: {}", name);
+        }
+    }
+
+    // Detectar ELIMINADOS
+    for (name, _) in &last_containers {
+        if !current_containers.contains_key(name) {
+            removed.push(json!({
+                "name": name,
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            }));
+
+            tracing::warn!("⚠️  CONTENEDOR ELIMINADO: {}", name);
+        }
+    }
+
+    json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed
+    })
+}
+
 // ============================================
 // FUNCIÓN PRINCIPAL - INTEGRADA
 // ============================================
@@ -196,6 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. INICIALIZAR AUTENTICACIÓN
     // ==========================================
     let auth_state = Arc::new(AuthState::from_env());
+    let docker_state: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
     info!("🔐 Sistema de autenticación inicializado");
 
     // ==========================================
@@ -274,9 +358,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ==========================================
 
     // TAREA: Loop de Dashboard (cada 5 segundos)
+    // TAREA: Loop de Dashboard (cada 5 segundos)
     let events_channel_id_clone = events_channel_id.clone();
     let core_rest_url_clone = core_rest_url.clone();
     let db_conn_clone = db_conn.clone();
+    let docker_state_clone = docker_state.clone(); // 👈 NUEVO
 
     tokio::spawn(async move {
         info!(
@@ -284,11 +370,79 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             DASHBOARD_INTERVAL_SECS
         );
         let mut interval = interval(Duration::from_secs(DASHBOARD_INTERVAL_SECS));
+        let mut last_results: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         loop {
             interval.tick().await;
             for action in commands::DYNAMIC_ACTIONS {
                 let (success, result) = commands::execute_action(action, &serde_json::Value::Null);
+
+                // ✅ DEDUPLICACIÓN: Solo publica si cambió o es la primera vez
+                let should_publish = match last_results.get(*action) {
+                    Some(prev) => prev != &result,
+                    None => true,
+                };
+
+                last_results.insert(action.to_string(), result.clone());
+
+                if !should_publish && *action != "docker_info" {
+                    // 👆 EXCEPCIÓN: docker_info SIEMPRE se procesa (para delta)
+                    info!("⏭️  '{}' sin cambios, omitiendo publicación", action);
+                    continue;
+                }
+
+                // 🔥 NUEVO: Delta para docker_info
+                if *action == "docker_info" && success {
+                    if let Ok(current_data) = serde_json::from_str::<serde_json::Value>(&result) {
+                        let mut state_guard = docker_state_clone.lock().await;
+                        let last_docker = state_guard.clone();
+
+                        // Calcular delta
+                        let delta = calculate_docker_delta(&last_docker, &current_data);
+
+                        // Guardar estado actual
+                        *state_guard = Some(current_data.clone());
+
+                        // SOLO publicar si hay cambios
+                        if !delta["added"]
+                            .as_array()
+                            .map(|a| a.is_empty())
+                            .unwrap_or(true)
+                            || !delta["removed"]
+                                .as_array()
+                                .map(|a| a.is_empty())
+                                .unwrap_or(true)
+                            || !delta["changed"]
+                                .as_array()
+                                .map(|a| a.is_empty())
+                                .unwrap_or(true)
+                        {
+                            let delta_payload = json!({
+                                "type": "dashboard",
+                                "action": "docker_info",
+                                "success": true,
+                                "delta": delta,
+                                "full_state": current_data,  // 👈 También envía estado completo
+                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                "agent": AGENT_CLIENT_ID
+                            });
+
+                            if let Err(e) = publish_to_core(
+                                &core_rest_url_clone,
+                                &events_channel_id_clone,
+                                delta_payload,
+                            )
+                            .await
+                            {
+                                error!("❌ Error publicando docker delta: {}", e);
+                            }
+                        } else {
+                            info!("⏭️  docker_info sin cambios, omitiendo publicación");
+                        }
+                    }
+                    continue; // Skip el resto del ciclo para docker
+                }
 
                 if *action == "network_threats" && success {
                     if let Ok(threats_json) = serde_json::from_str::<serde_json::Value>(&result) {
