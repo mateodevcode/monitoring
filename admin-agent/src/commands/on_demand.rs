@@ -500,16 +500,16 @@ build_json
         (true, "NEED_DB_ACCESS".to_string()) // Placeholder, lo manejamos en main.rs
     } else if action == "get_active_connections" {
         let output = std::process::Command::new("docker")
-            .args([
-                "run", "--rm", "--net=host", "-v", "/var/log:/host/var/log:ro", "alpine", "sh", "-c",
-                r#"
+        .args([
+            "run", "--rm", "--net=host", "-v", "/var/log:/host/var/log:ro", "alpine", "sh", "-c",
+            r#"
 apk add --no-cache iproute2 curl grep awk whois coreutils util-linux > /dev/null 2>&1
 
 # ============================================
-# WHITELIST
+# WHITELIST DE USUARIOS E IPS CONOCIDAS
 # ============================================
 EXPECTED_USERS="root|admin|deploy|ubuntu"
-KNOWN_IPS="79.117.90.148"  # Ajusta con tus IPs
+KNOWN_IPS="79.117.90.148"  # Ajusta con tus IPs confiables
 
 # ============================================
 # 1. IP DEL SERVIDOR
@@ -608,11 +608,10 @@ for line in $WEB_RAW; do
 done
 
 # ============================================
-# 4. GENERAR JSON FINAL (usando jq si existe, o manual)
+# 4. GENERAR JSON FINAL
 # ============================================
-# Intentar usar jq si está instalado
+# Usamos jq si está disponible, sino manual
 if command -v jq >/dev/null 2>&1; then
-    # Construir arrays con jq
     SSH_JSON="[]"
     if [ -n "$SSH_SESSIONS" ]; then
         SSH_JSON=$(echo "$SSH_SESSIONS" | while IFS='|' read -r user from login idle what user_status ip_status suspicious_cmd country; do
@@ -650,14 +649,14 @@ if command -v jq >/dev/null 2>&1; then
         --argjson web_connections "$WEB_JSON" \
         '{server_ip:$server_ip, ssh_sessions:$ssh_sessions, web_connections:$web_connections}'
 else
-    # Fallback: construir JSON manualmente (solo para casos sin jq)
+    # Fallback manual (sin jq)
     echo "{\"server_ip\":\"$SERVER_IP\",\"ssh_sessions\":["
     first=true
     if [ -n "$SSH_SESSIONS" ]; then
         echo "$SSH_SESSIONS" | while IFS='|' read -r user from login idle what user_status ip_status suspicious_cmd country; do
             [ -z "$user" ] && continue
             if [ "$first" = true ]; then first=false; else echo ","; fi
-            # Escapar caracteres especiales para JSON
+            # Escapar
             user=$(echo "$user" | sed 's/\\/\\\\/g; s/"/\\"/g')
             from=$(echo "$from" | sed 's/\\/\\\\/g; s/"/\\"/g')
             login=$(echo "$login" | sed 's/\\/\\\\/g; s/"/\\"/g')
@@ -682,9 +681,9 @@ else
     fi
     echo "]}"
 fi
-                "#,
-            ])
-            .output();
+            "#,
+        ])
+        .output();
 
         match output {
             Ok(out) => {
