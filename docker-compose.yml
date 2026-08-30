@@ -27,6 +27,7 @@ services:
       dockerfile: Dockerfile
     container_name: admin-agent
     restart: unless-stopped
+    pid: host
     env_file:
       - .env
     ports:
