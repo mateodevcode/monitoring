@@ -40,6 +40,8 @@ totp-rs = { version = "5", features = ["gen_secret", "qr"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 ureq = "2.9"
 tokio-tungstenite = "0.23"
+procfs = "0.16"
+nix = { version = "0.29", features = ["sched"] }
 
 # ==========================================
 # Base de Datos y Sistema

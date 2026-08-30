@@ -499,11 +499,14 @@ build_json
         // Similar, necesitamos acceso a la DB
         (true, "NEED_DB_ACCESS".to_string()) // Placeholder, lo manejamos en main.rs
     } else if action == "get_active_connections" {
+        use nix::sched::{setns, CloneFlags};
+        use procfs::net::{TcpNetEntry, TcpState};
         use std::collections::HashMap;
+        use std::os::fd::AsRawFd;
         use std::process::Command;
         use std::time::Duration;
 
-        // Helpers
+        // ---------- Helpers (sin cambios) ----------
         let is_private_ip = |ip: &str| -> bool {
             ip.starts_with("127.")
                 || ip.starts_with("10.")
@@ -536,11 +539,10 @@ build_json
         ];
 
         let mut ssh_sessions = Vec::new();
-        let mut web_connections_map: HashMap<String, (u32, u32)> = HashMap::new();
         let mut external_ips_to_geolocate = Vec::new();
 
         // ---------------------------------------------------------
-        // PASO 1: Obtener sesiones SSH (w) - SÍNCRONO
+        // PASO 1: Sesiones SSH vía `w` — sin cambios, ya es lo correcto
         // ---------------------------------------------------------
         let w_output = if std::path::Path::new("/usr/bin/nsenter").exists() {
             Command::new("/usr/bin/nsenter")
@@ -595,66 +597,71 @@ build_json
                         "user_status": user_status,
                         "ip_status": ip_status,
                         "suspicious_command": suspicious_cmd,
-                        "country": "XX" // Se actualiza en el Paso 3
+                        "country": "XX"
                     }));
                 }
             }
         }
 
         // ---------------------------------------------------------
-        // PASO 2: Obtener conexiones Web (ss) - SÍNCRONO
+        // PASO 2: Conexiones web — NATIVO, sin spawnear `ss`
+        // Hilo dedicado: entra al netns del host, lee /proc/net/tcp{,6}
+        // con `procfs`, y muere. El namespace no se queda pegado al
+        // pool de tokio.
         // ---------------------------------------------------------
-        let ss_output = if std::path::Path::new("/usr/bin/nsenter").exists() {
-            Command::new("/usr/bin/nsenter")
-                .args([
-                    "-t",
-                    "1",
-                    "-n",
-                    "/usr/bin/ss",
-                    "-tn",
-                    "state",
-                    "established",
-                ])
-                .output()
-        } else {
-            Command::new("/usr/bin/ss")
-                .args(["-tn", "state", "established"])
-                .output()
-        };
+        let web_connections_map: HashMap<String, (u32, u32)> =
+            std::thread::spawn(|| -> HashMap<String, (u32, u32)> {
+                let mut map = HashMap::new();
 
-        if let Ok(out) = ss_output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines().skip(1) {
-                // Saltar header
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 5 {
-                    let local_addr = parts[3];
-                    let peer_addr = parts[4];
+                // Entrar al netns del host (requiere CAP_SYS_ADMIN, ya la tienes).
+                // Si falla (ej. corriendo fuera del contenedor), seguimos
+                // igual leyendo el netns actual como fallback silencioso.
+                if let Ok(f) = std::fs::File::open("/proc/1/ns/net") {
+                    let _ = setns(f.as_raw_fd(), CloneFlags::CLONE_NEWNET);
+                }
 
-                    let local_port_str = local_addr.split(':').last().unwrap_or("0");
-                    let local_port: u32 = local_port_str.parse().unwrap_or(0);
+                let mut entries: Vec<TcpNetEntry> = Vec::new();
+                if let Ok(t4) = procfs::net::tcp() {
+                    entries.extend(t4);
+                }
+                if let Ok(t6) = procfs::net::tcp6() {
+                    entries.extend(t6);
+                }
 
-                    if (local_port == 80 || local_port == 443) && !peer_addr.contains('[') {
-                        let peer_ip = peer_addr.split(':').next().unwrap_or("");
-
-                        if !is_private_ip(peer_ip) {
-                            let key = format!("{}|{}", peer_ip, local_port);
-                            let entry = web_connections_map.entry(key).or_insert((local_port, 0));
-                            entry.1 += 1; // Incrementar contador
-                            external_ips_to_geolocate.push(peer_ip.to_string());
-                        }
+                for entry in entries {
+                    if entry.state != TcpState::Established {
+                        continue;
                     }
+                    let local_port = entry.local_address.port();
+                    if local_port != 80 && local_port != 443 {
+                        continue;
+                    }
+                    let peer_ip = entry.remote_address.ip().to_string();
+                    let key = format!("{}|{}", peer_ip, local_port);
+                    map.entry(key)
+                        .and_modify(|(_, c): &mut (u32, u32)| *c += 1)
+                        .or_insert((local_port as u32, 1));
+                }
+
+                map
+            })
+            .join()
+            .unwrap_or_default();
+
+        for key in web_connections_map.keys() {
+            if let Some(peer_ip) = key.split('|').next() {
+                if !is_private_ip(peer_ip) {
+                    external_ips_to_geolocate.push(peer_ip.to_string());
                 }
             }
         }
 
         // ---------------------------------------------------------
-        // PASO 3: Geolocalización SÍNCRONA (con timeout de 1s)
+        // PASO 3: Geolocalización — sin cambios
         // ---------------------------------------------------------
         external_ips_to_geolocate.sort();
-        external_ips_to_geolocate.dedup(); // Eliminar duplicados
+        external_ips_to_geolocate.dedup();
 
-        // Cliente con timeout para que no se congele si ip-api tarda
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(1))
             .build()
@@ -681,7 +688,7 @@ build_json
         }
 
         // ---------------------------------------------------------
-        // PASO 4: Ensamblar respuesta final
+        // PASO 4: Ensamblar respuesta — misma forma de siempre
         // ---------------------------------------------------------
         for session in &mut ssh_sessions {
             if let Some(ip) = session["from"].as_str() {
@@ -713,7 +720,6 @@ build_json
             }));
         }
 
-        // Ordenar conexiones web por cantidad (las más activas primero)
         final_web_connections.sort_by(|a, b| b["count"].as_u64().cmp(&a["count"].as_u64()));
 
         let response = serde_json::json!({
