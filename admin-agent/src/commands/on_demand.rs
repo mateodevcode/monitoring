@@ -498,11 +498,11 @@ build_json
     } else if action == "get_top_attackers" {
         // Similar, necesitamos acceso a la DB
         (true, "NEED_DB_ACCESS".to_string()) // Placeholder, lo manejamos en main.rs
-    } else if action == "network_threats" {
+    } else if action == "get_active_connections" {
         let output = std::process::Command::new("docker")
-            .args([
-                "run", "--rm", "--net=host", "-v", "/var/log:/host/var/log:ro", "alpine", "sh", "-c",
-                r#"
+        .args([
+            "run", "--rm", "--net=host", "-v", "/var/log:/host/var/log:ro", "alpine", "sh", "-c",
+            r#"
 apk add --no-cache iproute2 curl grep awk whois coreutils util-linux > /dev/null 2>&1
 
 # ============================================
@@ -512,291 +512,111 @@ EXPECTED_USERS="root|admin|deploy|ubuntu"
 EXPECTED_IPS="127.0.0.1|::1|10.0.0.0/8|192.168.0.0/16|172.16.0.0/12"
 
 # ============================================
-# FUENTE 1: SESIONES VIVAS (w - usuarios REALMENTE conectados)
+# 1. SESIONES ACTIVAS CON w (ÚNICAS por usuario/IP)
 # ============================================
-echo "=== SESIONES_ACTIVAS ==="
-w -hs 2>/dev/null | while read line; do
-    USER=$(echo "$line" | awk '{print $1}')
-    FROM=$(echo "$line" | awk '{print $3}')
-    LOGIN=$(echo "$line" | awk '{print $4}')
-    IDLE=$(echo "$line" | awk '{print $5}')
-    WHAT=$(echo "$line" | awk '{$1=$2=$3=$4=$5=$6=$7=$8=""; print $0}' | sed 's/^ *//')
-    
-    # Verificar si el usuario es esperado
-    if echo "$EXPECTED_USERS" | grep -q "$USER"; then
-        USER_STATUS="EXPECTED"
-    else
-        USER_STATUS="SUSPICIOUS"
-    fi
-    
-    # Verificar si la IP es esperada
-    if echo "$FROM" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-        if echo "$FROM" | grep -qE '^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)'; then
-            IP_STATUS="INTERNAL"
-        else
-            IP_STATUS="EXTERNAL"
-            # Verificar contra whitelist de IPs externas conocidas
-            if [ "$FROM" = "79.117.90.148" ] || [ "$FROM" = "1.2.3.4" ]; then
-                IP_STATUS="KNOWN"
-            fi
-        fi
-    else
-        IP_STATUS="UNKNOWN"
-    fi
-    
-    # Detectar reverse shells / comandos sospechosos
-    SUSPICIOUS_CMD=0
-    if echo "$WHAT" | grep -qE 'bash|nc |nohup|python -m|perl -e|ruby -e|sh -i|socat|telnet'; then
-        if [ "$USER" != "root" ] && [ "$USER" != "admin" ]; then
-            SUSPICIOUS_CMD=1
-        fi
-    fi
-    
-    echo "${USER}|${FROM}|${LOGIN}|${IDLE}|${WHAT}|${USER_STATUS}|${IP_STATUS}|${SUSPICIOUS_CMD}"
-done
-
-# ============================================
-# FUENTE 2: LOGINS EXITOSOS RECIENTES (last)
-# ============================================
-echo "=== LOGINS_RECIENTES ==="
-last -f /host/var/log/wtmp 2>/dev/null | head -20 | grep -v "^$\|^wtmp\|reboot" | while read line; do
-    USER=$(echo "$line" | awk '{print $1}')
-    TTY=$(echo "$line" | awk '{print $2}')
-    FROM=$(echo "$line" | awk '{print $3}')
-    DATE=$(echo "$line" | awk '{print $4, $5, $6, $7, $8}')
-    
-    echo "${USER}|${TTY}|${FROM}|${DATE}"
-done
-
-# ============================================
-# FUENTE 3: PUERTOS ABIERTOS (para contexto)
-# ============================================
-echo "=== PUERTOS_ABIERTOS ==="
-ss -tlnp 2>/dev/null | grep LISTEN | awk '
+w -hs 2>/dev/null | awk '
 {
-    split($4, addr, ":");
-    port = addr[length(addr)];
-    process = $NF;
-    
-    # Extraer nombre del proceso
-    if (match(process, /\([^)]+\)/)) {
-        proc_name = substr(process, RSTART+1, RLENGTH-2);
-    } else {
-        proc_name = process;
+    user = $1;
+    from = $3;
+    login = $4;
+    idle = $5;
+    # El resto es el comando (what)
+    for (i=6; i<=NF; i++) {
+        what = what " " $i;
     }
-    
-    print port "|" proc_name;
-}' | sort -u
-
-# ============================================
-# FUENTE 4: CONEXIONES SSH ESTABLECIDAS (SOLO para confirmar)
-# ============================================
-echo "=== CONEXIONES_SSH ==="
-ss -tn state established dport :22 2>/dev/null | awk '
-NR>1 {
-    split($5, peer, ":");
-    remote_ip = peer[1];
-    gsub(/[\[\]]/, "", remote_ip);
-    
-    if (remote_ip !~ /^127\./ && remote_ip !~ /^10\./ && 
-        remote_ip !~ /^192\.168\./ && remote_ip !~ /^172\.(1[6-9]|2[0-9]|3[01])\./) {
-        print remote_ip;
+    # Solo guardamos si no hemos visto este user+from antes (evitar duplicados)
+    key = user "|" from;
+    if (!(key in seen)) {
+        seen[key] = 1;
+        print user "|" from "|" login "|" idle "|" what;
     }
-}' | sort -u
+    what = "";
+}' > /tmp/sessions.txt
 
 # ============================================
-# COMBINAR Y GENERAR INFORME
+# 2. ENRIQUECER CON PAÍS Y ESTADO
 # ============================================
-echo "=== INFORME_FINAL ==="
+cat /tmp/sessions.txt | while IFS='|' read -r user from login idle what; do
+    # Determinar estado del usuario
+    if echo "$EXPECTED_USERS" | grep -q "$user"; then
+        user_status="EXPECTED"
+    else
+        user_status="SUSPICIOUS"
+    fi
+    
+    # Determinar estado de IP
+    if echo "$from" | grep -qE '^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.'; then
+        ip_status="INTERNAL"
+    elif [ "$from" = "79.117.90.148" ] || [ "$from" = "1.2.3.4" ]; then
+        ip_status="KNOWN_EXTERNAL"
+    else
+        ip_status="EXTERNAL"
+    fi
+    
+    # Detectar comandos sospechosos (reverse shell)
+    suspicious_cmd=0
+    if echo "$what" | grep -qE 'bash|nc |nohup|python -m|perl -e|ruby -e|sh -i|socat|telnet'; then
+        if [ "$user" != "root" ] && [ "$user" != "admin" ]; then
+            suspicious_cmd=1
+        fi
+    fi
+    
+    # Obtener país solo para IPs externas
+    country="XX"
+    if [ "$ip_status" = "EXTERNAL" ] || [ "$ip_status" = "KNOWN_EXTERNAL" ]; then
+        country=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$from?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+        if [ ${#country} -ne 2 ]; then
+            country="XX"
+        fi
+    fi
+    
+    echo "${user}|${from}|${login}|${idle}|${what}|${user_status}|${ip_status}|${suspicious_cmd}|${country}"
+done
 
-# Contar sesiones activas
-ACTIVE_SESSIONS=$(w -hs 2>/dev/null | wc -l)
-SUSPICIOUS_SESSIONS=$(w -hs 2>/dev/null | awk -v users="$EXPECTED_USERS" '
-    BEGIN { split(users, u, "|"); suspicious=0; }
-    {
-        user=$1;
-        is_expected=0;
-        for (i in u) {
-            if (u[i] == user) { is_expected=1; break; }
-        }
-        if (!is_expected) suspicious++;
-    }
-    END { print suspicious; }
-')
-
-echo "SESIONES_TOTAL=${ACTIVE_SESSIONS}"
-echo "SESIONES_SOSPECHOSAS=${SUSPICIOUS_SESSIONS}"
-
-# Verificar si hay usuarios root desde IPs externas
-ROOT_EXTERNAL=$(w -hs 2>/dev/null | awk '$1=="root" && $3 !~ /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/ {print $3}')
-
-if [ -n "$ROOT_EXTERNAL" ]; then
-    echo "ROOT_EXTERNO=1"
-    echo "IP_ROOT_EXTERNO=${ROOT_EXTERNAL}"
-else
-    echo "ROOT_EXTERNO=0"
+# ============================================
+# 3. SI NO HAY SESIONES, DEVOLVER ARRAY VACÍO
+# ============================================
+if [ ! -s /tmp/sessions.txt ]; then
+    echo "[]"
+    exit 0
 fi
-
-echo "TIMESTAMP=$(date +%s)"
-                "#,
-            ])
-            .output();
+            "#,
+        ])
+        .output();
 
         match output {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let mut sessions = Vec::new();
-                let mut suspicious = Vec::new();
-                let mut logins = Vec::new();
-                let mut ports = Vec::new();
-                let mut ssh_connections = Vec::new();
-
-                let mut current_section = "";
-                let mut root_external = 0;
-                let mut root_external_ip = "";
 
                 for line in stdout.lines() {
-                    if line.starts_with("=== SESIONES_ACTIVAS ===") {
-                        current_section = "sessions";
-                        continue;
-                    } else if line.starts_with("=== LOGINS_RECIENTES ===") {
-                        current_section = "logins";
-                        continue;
-                    } else if line.starts_with("=== PUERTOS_ABIERTOS ===") {
-                        current_section = "ports";
-                        continue;
-                    } else if line.starts_with("=== CONEXIONES_SSH ===") {
-                        current_section = "ssh";
-                        continue;
-                    } else if line.starts_with("=== INFORME_FINAL ===") {
-                        current_section = "report";
+                    if line.trim().is_empty() || line == "[]" {
                         continue;
                     }
-
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-
-                    match current_section {
-                        "sessions" => {
-                            let parts: Vec<&str> = line.split('|').collect();
-                            if parts.len() == 8 {
-                                let user = parts[0];
-                                let from = parts[1];
-                                let login = parts[2];
-                                let idle = parts[3];
-                                let what = parts[4];
-                                let user_status = parts[5];
-                                let ip_status = parts[6];
-                                let suspicious_cmd = parts[7].trim() == "1";
-
-                                let session = serde_json::json!({
-                                    "user": user,
-                                    "from": from,
-                                    "login": login,
-                                    "idle": idle,
-                                    "what": what,
-                                    "user_status": user_status,
-                                    "ip_status": ip_status,
-                                    "suspicious_command": suspicious_cmd
-                                });
-
-                                sessions.push(session);
-
-                                // Si es sospechoso, añadir a lista de sospechosos
-                                if user_status == "SUSPICIOUS"
-                                    || ip_status == "EXTERNAL"
-                                    || suspicious_cmd
-                                {
-                                    suspicious.push(serde_json::json!({
-                                        "user": user,
-                                        "from": from,
-                                        "reason": if user_status == "SUSPICIOUS" {
-                                            "Usuario no esperado"
-                                        } else if suspicious_cmd {
-                                            "Comando sospechoso"
-                                        } else {
-                                            "IP externa no conocida"
-                                        }
-                                    }));
-                                }
-                            }
-                        }
-                        "logins" => {
-                            let parts: Vec<&str> = line.split('|').collect();
-                            if parts.len() == 4 {
-                                logins.push(serde_json::json!({
-                                    "user": parts[0],
-                                    "tty": parts[1],
-                                    "from": parts[2],
-                                    "date": parts[3]
-                                }));
-                            }
-                        }
-                        "ports" => {
-                            let parts: Vec<&str> = line.split('|').collect();
-                            if parts.len() == 2 {
-                                ports.push(serde_json::json!({
-                                    "port": parts[0],
-                                    "process": parts[1]
-                                }));
-                            }
-                        }
-                        "ssh" => {
-                            ssh_connections.push(line);
-                        }
-                        "report" => {
-                            if line.starts_with("ROOT_EXTERNO=") {
-                                root_external = line
-                                    .split('=')
-                                    .nth(1)
-                                    .unwrap_or("0")
-                                    .parse::<i32>()
-                                    .unwrap_or(0);
-                            } else if line.starts_with("IP_ROOT_EXTERNO=") {
-                                root_external_ip = line.split('=').nth(1).unwrap_or("");
-                            }
-                        }
-                        _ => {}
+                    let parts: Vec<&str> = line.split('|').collect();
+                    if parts.len() == 9 {
+                        sessions.push(serde_json::json!({
+                            "user": parts[0],
+                            "from": parts[1],
+                            "login": parts[2],
+                            "idle": parts[3],
+                            "what": parts[4],
+                            "user_status": parts[5],
+                            "ip_status": parts[6],
+                            "suspicious_command": parts[7].trim() == "1",
+                            "country": parts[8]
+                        }));
                     }
                 }
 
-                // Determinar nivel de riesgo
-                let risk_level = if root_external == 1 && !suspicious.is_empty() {
-                    "CRITICAL"
-                } else if !suspicious.is_empty() {
-                    "WARNING"
-                } else if sessions.len() > 5 {
-                    "INFO"
+                // Si no hay sesiones, devolver array vacío
+                if sessions.is_empty() {
+                    (true, "[]".to_string())
                 } else {
-                    "SAFE"
-                };
-
-                let response = serde_json::json!({
-                    "risk_level": risk_level,
-                    "summary": {
-                        "total_sessions": sessions.len(),
-                        "suspicious_count": suspicious.len(),
-                        "recent_logins": logins.len(),
-                        "open_ports": ports.len(),
-                        "ssh_connections": ssh_connections.len(),
-                        "root_external": root_external == 1,
-                        "root_external_ip": root_external_ip
-                    },
-                    "sessions": sessions,
-                    "suspicious": suspicious,
-                    "recent_logins": logins,
-                    "open_ports": ports,
-                    "ssh_connections": ssh_connections,
-                    "timestamp": chrono::Utc::now().to_rfc3339()
-                });
-
-                (true, response.to_string())
+                    (true, serde_json::json!({"sessions": sessions}).to_string())
+                }
             }
-            Err(e) => (
-                false,
-                format!("Error ejecutando auditoría de sesiones: {}", e),
-            ),
+            Err(e) => (false, format!("Error: {}", e)),
         }
     } else if let Some(&(_, program, args)) =
         ALLOWED_COMMANDS.iter().find(|&&(cmd, _, _)| cmd == action)
