@@ -44,8 +44,11 @@ services:
         # --- AGREGAR ESTAS DOS LÍNEAS ---
       - /var/run/utmp:/var/run/utmp:ro
       - /var/log/wtmp:/var/log/wtmp:ro
+    cap_add:
+      - SYS_ADMIN
     networks:
       - central_network
+
     depends_on:
       socket-core:
         condition: service_healthy
