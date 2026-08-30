@@ -544,7 +544,7 @@ build_json
         // PASO 1: Sesiones SSH vía `w` — sin cambios, ya es lo correcto
         // ---------------------------------------------------------
         let w_output = if std::path::Path::new("/usr/bin/nsenter").exists() {
-            Command::new("/usr/bin/nsenter")
+            Command::new("/usr/bin/")
                 .args(["-t", "1", "-m", "-u", "-i", "-n", "-p", "/usr/bin/w", "-hs"])
                 .output()
         } else {
