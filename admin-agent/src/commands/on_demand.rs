@@ -502,7 +502,6 @@ build_json
         use nix::sched::{setns, CloneFlags};
         use procfs::net::{TcpNetEntry, TcpState};
         use std::collections::HashMap;
-        use std::os::fd::AsRawFd;
         use std::process::Command;
         use std::time::Duration;
 
@@ -617,7 +616,7 @@ build_json
                 // Si falla (ej. corriendo fuera del contenedor), seguimos
                 // igual leyendo el netns actual como fallback silencioso.
                 if let Ok(f) = std::fs::File::open("/proc/1/ns/net") {
-                    let _ = setns(f.as_raw_fd(), CloneFlags::CLONE_NEWNET);
+                    let _ = setns(f, CloneFlags::CLONE_NEWNET);
                 }
 
                 let mut entries: Vec<TcpNetEntry> = Vec::new();
