@@ -620,42 +620,35 @@ build_json
                     Err(e) => tracing::error!("❌ No se pudo abrir /proc/1/ns/net: {:?}", e),
                 }
 
-                let mut entries: Vec<TcpNetEntry> = Vec::new();
-                match procfs::net::tcp() {
-                    Ok(t4) => {
-                        tracing::info!("📊 procfs::net::tcp() devolvió {} entradas", t4.len());
-                        entries.extend(t4);
+                // Clave: usamos /proc/thread-self, NO /proc/self ni /proc/net.
+                // /proc/self resuelve al proceso (TGID) -> seguiría viendo el netns
+                // del hilo principal. /proc/thread-self resuelve al hilo que llamó,
+                // que es justo el que migró de namespace con setns().
+                let mut entries = Vec::new();
+                for (path, is_v6) in [
+                    ("/proc/thread-self/net/tcp", false),
+                    ("/proc/thread-self/net/tcp6", true),
+                ] {
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => {
+                            let parsed = parse_proc_net_tcp(&content, is_v6);
+                            tracing::info!("📊 {} -> {} entradas", path, parsed.len());
+                            entries.extend(parsed);
+                        }
+                        Err(e) => tracing::error!("❌ No se pudo leer {}: {:?}", path, e),
                     }
-                    Err(e) => tracing::error!("❌ procfs::net::tcp() falló: {:?}", e),
-                }
-                match procfs::net::tcp6() {
-                    Ok(t6) => {
-                        tracing::info!("📊 procfs::net::tcp6() devolvió {} entradas", t6.len());
-                        entries.extend(t6);
-                    }
-                    Err(e) => tracing::error!("❌ procfs::net::tcp6() falló: {:?}", e),
                 }
 
-                tracing::info!("📊 Total entradas antes de filtrar: {}", entries.len());
+                tracing::info!("📊 Total entradas (thread-self): {}", entries.len());
 
-                for entry in &entries {
-                    tracing::info!(
-                        "   entrada: local={:?} remote={:?} state={:?}",
-                        entry.local_address,
-                        entry.remote_address,
-                        entry.state
-                    );
-                }
-
-                for entry in entries {
-                    if entry.state != TcpState::Established {
+                for (local_port, peer_ip, state) in entries {
+                    if state != 0x01 {
+                        // 0x01 = TCP_ESTABLISHED
                         continue;
                     }
-                    let local_port = entry.local_address.port();
                     if local_port != 80 && local_port != 443 {
                         continue;
                     }
-                    let peer_ip = entry.remote_address.ip().to_string();
                     let key = format!("{}|{}", peer_ip, local_port);
                     map.entry(key)
                         .and_modify(|(_, c): &mut (u32, u32)| *c += 1)
@@ -761,4 +754,63 @@ build_json
                 .to_string(),
         )
     }
+}
+
+/// Parsea /proc/net/tcp o /proc/net/tcp6. Devuelve (puerto_local, ip_remota, estado_hex).
+/// Formato del kernel: "sl local_address rem_address st tx_q:rx_q ..."
+/// Direcciones en hex, IPv4 como 8 chars little-endian, IPv6 como 32 chars.
+fn parse_proc_net_tcp(content: &str, is_v6: bool) -> Vec<(u16, String, u8)> {
+    let mut out = Vec::new();
+    for line in content.lines().skip(1) {
+        // saltar encabezado
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let local = parts[1]; // "IP:PUERTO" en hex
+        let remote = parts[2];
+        let state_hex = parts[3];
+
+        let local_port = match local.split(':').nth(1) {
+            Some(p) => u16::from_str_radix(p, 16).unwrap_or(0),
+            None => continue,
+        };
+
+        let remote_ip_hex = match remote.split(':').next() {
+            Some(ip) => ip,
+            None => continue,
+        };
+
+        let state = u8::from_str_radix(state_hex, 16).unwrap_or(0);
+
+        let peer_ip = if is_v6 {
+            parse_hex_ipv6(remote_ip_hex)
+        } else {
+            parse_hex_ipv4(remote_ip_hex)
+        };
+
+        if let Some(ip) = peer_ip {
+            out.push((local_port, ip, state));
+        }
+    }
+    out
+}
+
+fn parse_hex_ipv4(hex: &str) -> Option<String> {
+    let val = u32::from_str_radix(hex, 16).ok()?;
+    // El kernel guarda la IP en orden de bytes little-endian dentro del hex
+    let ip = std::net::Ipv4Addr::from(val.swap_bytes());
+    Some(ip.to_string())
+}
+
+fn parse_hex_ipv6(hex: &str) -> Option<String> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..4 {
+        let word = u32::from_str_radix(&hex[i * 8..i * 8 + 8], 16).ok()?;
+        bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    Some(std::net::Ipv6Addr::from(bytes).to_string())
 }
