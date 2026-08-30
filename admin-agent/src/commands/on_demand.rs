@@ -612,19 +612,39 @@ build_json
             std::thread::spawn(|| -> HashMap<String, (u32, u32)> {
                 let mut map = HashMap::new();
 
-                // Entrar al netns del host (requiere CAP_SYS_ADMIN, ya la tienes).
-                // Si falla (ej. corriendo fuera del contenedor), seguimos
-                // igual leyendo el netns actual como fallback silencioso.
-                if let Ok(f) = std::fs::File::open("/proc/1/ns/net") {
-                    let _ = setns(f, CloneFlags::CLONE_NEWNET);
+                match std::fs::File::open("/proc/1/ns/net") {
+                    Ok(f) => match setns(f, CloneFlags::CLONE_NEWNET) {
+                        Ok(_) => tracing::info!("✅ setns OK: entramos al netns del host"),
+                        Err(e) => tracing::error!("❌ setns FALLÓ: {:?}", e),
+                    },
+                    Err(e) => tracing::error!("❌ No se pudo abrir /proc/1/ns/net: {:?}", e),
                 }
 
                 let mut entries: Vec<TcpNetEntry> = Vec::new();
-                if let Ok(t4) = procfs::net::tcp() {
-                    entries.extend(t4);
+                match procfs::net::tcp() {
+                    Ok(t4) => {
+                        tracing::info!("📊 procfs::net::tcp() devolvió {} entradas", t4.len());
+                        entries.extend(t4);
+                    }
+                    Err(e) => tracing::error!("❌ procfs::net::tcp() falló: {:?}", e),
                 }
-                if let Ok(t6) = procfs::net::tcp6() {
-                    entries.extend(t6);
+                match procfs::net::tcp6() {
+                    Ok(t6) => {
+                        tracing::info!("📊 procfs::net::tcp6() devolvió {} entradas", t6.len());
+                        entries.extend(t6);
+                    }
+                    Err(e) => tracing::error!("❌ procfs::net::tcp6() falló: {:?}", e),
+                }
+
+                tracing::info!("📊 Total entradas antes de filtrar: {}", entries.len());
+
+                for entry in &entries {
+                    tracing::info!(
+                        "   entrada: local={:?} remote={:?} state={:?}",
+                        entry.local_address,
+                        entry.remote_address,
+                        entry.state
+                    );
                 }
 
                 for entry in entries {
@@ -642,6 +662,7 @@ build_json
                         .or_insert((local_port as u32, 1));
                 }
 
+                tracing::info!("📊 web_connections_map final: {} entradas", map.len());
                 map
             })
             .join()
