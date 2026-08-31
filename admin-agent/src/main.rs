@@ -369,17 +369,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut last_results: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
+        // 🔥 Acciones que SIEMPRE se publican, aunque no hayan cambiado
+        const ALWAYS_PUBLISH: &[&str] = &["ram_info", "disk_space", "uptime_check"];
+
         loop {
             interval.tick().await;
 
             for action in commands::DYNAMIC_ACTIONS {
                 let (success, result) = commands::execute_action(action, &serde_json::Value::Null);
 
-                let should_publish = match last_results.get(*action) {
-                    Some(prev) => prev != &result,
-                    None => true,
+                // 🔥 NUEVA LÓGICA: publica siempre si está en la lista blanca
+                let should_publish = if ALWAYS_PUBLISH.contains(action) {
+                    true // Siempre publicar RAM, Disco y Uptime
+                } else {
+                    match last_results.get(*action) {
+                        Some(prev) => prev != &result,
+                        None => true,
+                    }
                 };
 
+                // Guardar el resultado actual para futuras comparaciones (importante hacerlo siempre)
                 last_results.insert(action.to_string(), result.clone());
 
                 if !should_publish {
