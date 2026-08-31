@@ -345,7 +345,7 @@ fn parse_proc_net_tcp(content: &str, is_v6: bool) -> Vec<(u16, String, u8)> {
         let remote_addr = parts[2];
         let state = parts[3];
 
-        let (local_ip, local_port) = {
+        let (_local_ip, local_port) = {
             let addr_parts: Vec<&str> = local_addr.split(':').collect();
             if addr_parts.len() != 2 {
                 continue;
