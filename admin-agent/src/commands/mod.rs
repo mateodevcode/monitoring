@@ -71,7 +71,6 @@ pub fn execute_action(action: &str, payload: &Value) -> (bool, String) {
 pub const DYNAMIC_ACTIONS: &[&str] = &[
     "ram_info",
     "disk_space",
-    "cpu_info",
     "docker_info",
     "uptime_check",
     "get_active_connections",

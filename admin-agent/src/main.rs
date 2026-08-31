@@ -279,7 +279,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. INICIALIZAR AUTENTICACIÓN
     // ==========================================
     let auth_state = Arc::new(AuthState::from_env());
-    let docker_state: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
     info!("🔐 Sistema de autenticación inicializado");
 
     // ==========================================
@@ -359,10 +358,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // TAREA: Loop de Dashboard (cada 5 segundos)
     // TAREA: Loop de Dashboard (cada 5 segundos)
+    // TAREA: Loop de Dashboard (cada 5 segundos)
     let events_channel_id_clone = events_channel_id.clone();
     let core_rest_url_clone = core_rest_url.clone();
     let db_conn_clone = db_conn.clone();
-    let docker_state_clone = docker_state.clone(); // 👈 NUEVO
 
     tokio::spawn(async move {
         info!(
@@ -375,6 +374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         loop {
             interval.tick().await;
+
             for action in commands::DYNAMIC_ACTIONS {
                 let (success, result) = commands::execute_action(action, &serde_json::Value::Null);
 
@@ -386,64 +386,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 last_results.insert(action.to_string(), result.clone());
 
-                if !should_publish && *action != "docker_info" {
-                    // 👆 EXCEPCIÓN: docker_info SIEMPRE se procesa (para delta)
+                // ⏭️ Si no hay cambios, saltea esta acción
+                if !should_publish {
                     info!("⏭️  '{}' sin cambios, omitiendo publicación", action);
                     continue;
                 }
 
-                // 🔥 NUEVO: Delta para docker_info
-                if *action == "docker_info" && success {
-                    if let Ok(current_data) = serde_json::from_str::<serde_json::Value>(&result) {
-                        let mut state_guard = docker_state_clone.lock().await;
-                        let last_docker = state_guard.clone();
-
-                        // Calcular delta
-                        let delta = calculate_docker_delta(&last_docker, &current_data);
-
-                        // Guardar estado actual
-                        *state_guard = Some(current_data.clone());
-
-                        // SOLO publicar si hay cambios
-                        if !delta["added"]
-                            .as_array()
-                            .map(|a| a.is_empty())
-                            .unwrap_or(true)
-                            || !delta["removed"]
-                                .as_array()
-                                .map(|a| a.is_empty())
-                                .unwrap_or(true)
-                            || !delta["changed"]
-                                .as_array()
-                                .map(|a| a.is_empty())
-                                .unwrap_or(true)
-                        {
-                            let delta_payload = json!({
-                                "type": "dashboard",
-                                "action": "docker_info",
-                                "success": true,
-                                "delta": delta,
-                                "full_state": current_data,  // 👈 También envía estado completo
-                                "timestamp": chrono::Utc::now().to_rfc3339(),
-                                "agent": AGENT_CLIENT_ID
-                            });
-
-                            if let Err(e) = publish_to_core(
-                                &core_rest_url_clone,
-                                &events_channel_id_clone,
-                                delta_payload,
-                            )
-                            .await
-                            {
-                                error!("❌ Error publicando docker delta: {}", e);
-                            }
-                        } else {
-                            info!("⏭️  docker_info sin cambios, omitiendo publicación");
-                        }
-                    }
-                    continue; // Skip el resto del ciclo para docker
-                }
-
+                // 🔥 Procesamiento especial para network_threats (guardar en BD)
                 if *action == "network_threats" && success {
                     if let Ok(threats_json) = serde_json::from_str::<serde_json::Value>(&result) {
                         if let Some(threats) = threats_json["threats"].as_array() {
@@ -463,6 +412,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // 📤 PUBLICAR RESULTADO (igual para TODAS las acciones)
                 let response_payload = json!({
                     "type": "dashboard",
                     "action": action,
