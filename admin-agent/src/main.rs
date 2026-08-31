@@ -376,24 +376,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 👇 TAREA: Docker Info (SPAWN SEPARADO, no dentro del dashboard)
+    // TAREA: Docker Info (cada 5 segundos, en thread dedicado)
     let events_channel_id_clone_docker = events_channel_id.clone();
     let core_rest_url_clone_docker = core_rest_url.clone();
 
     tokio::spawn(async move {
         info!("🐳 Iniciando loop de Docker Info (cada 5s, async)...");
-        let mut interval_docker = interval(Duration::from_secs(5)); // 👈 NOMBRE DIFERENTE
+        let mut interval_docker = interval(Duration::from_secs(5));
         let mut last_docker_result: Option<String> = None;
 
         loop {
             interval_docker.tick().await;
 
+            // Ejecutar en thread separado (no bloquea el async loop)
             let docker_result = tokio::task::spawn_blocking(|| {
                 commands::execute_action("docker_info", &serde_json::Value::Null)
             })
             .await;
 
             if let Ok((success, result)) = docker_result {
+                // Deduplicación
                 let should_publish = match &last_docker_result {
                     Some(prev) => prev != &result,
                     None => true,
@@ -406,11 +408,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                // ✅ Parsear result y agregar full_state + delta
+                let output_payload =
+                    if let Ok(full_state) = serde_json::from_str::<serde_json::Value>(&result) {
+                        json!({
+                            "full_state": full_state,
+                            "delta": {
+                                "added": [],
+                                "removed": [],
+                                "changed": []
+                            },
+                            "timestamp": chrono::Utc::now().to_rfc3339()
+                        })
+                    } else {
+                        json!({ "error": result })
+                    };
+
                 let response_payload = json!({
                     "type": "dashboard",
                     "action": "docker_info",
                     "success": success,
-                    "output": result,
+                    "output": output_payload.to_string(),
                     "agent": AGENT_CLIENT_ID
                 });
 
