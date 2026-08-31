@@ -182,6 +182,88 @@ async fn publish_to_core(
     }
 }
 
+fn calculate_docker_delta(
+    last: &Option<serde_json::Value>,
+    current: &serde_json::Value,
+) -> serde_json::Value {
+    use std::collections::HashMap;
+
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+
+    // Obtener arrays de contenedores
+    let current_containers = current["containers"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|c| {
+            let name = c["name"].as_str().unwrap_or("unknown");
+            Some((name.to_string(), c.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let last_containers = if let Some(last_val) = last {
+        last_val["containers"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|c| {
+                let name = c["name"].as_str().unwrap_or("unknown");
+                Some((name.to_string(), c.clone()))
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+
+    // Detectar AGREGADOS y CAMBIOS
+    for (name, current_container) in &current_containers {
+        if let Some(last_container) = last_containers.get(name) {
+            // Comparar status
+            let current_status = current_container["status"].as_str().unwrap_or("");
+            let last_status = last_container["status"].as_str().unwrap_or("");
+
+            if current_status != last_status {
+                changed.push(json!({
+                    "name": name,
+                    "status_before": last_status,
+                    "status_after": current_status,
+                    "size": current_container["size"].as_str().unwrap_or("")
+                }));
+            }
+        } else {
+            // NUEVO contenedor
+            added.push(json!({
+                "name": name,
+                "status": current_container["status"].as_str().unwrap_or(""),
+                "size": current_container["size"].as_str().unwrap_or(""),
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            }));
+
+            tracing::warn!("🚨 NUEVO CONTENEDOR DETECTADO: {}", name);
+        }
+    }
+
+    // Detectar ELIMINADOS
+    for (name, _) in &last_containers {
+        if !current_containers.contains_key(name) {
+            removed.push(json!({
+                "name": name,
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            }));
+
+            tracing::warn!("⚠️  CONTENEDOR ELIMINADO: {}", name);
+        }
+    }
+
+    json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed
+    })
+}
+
 // ============================================
 // FUNCIÓN PRINCIPAL - INTEGRADA
 // ============================================
@@ -324,78 +406,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                if let Ok((success, result)) = docker_result {
-                    let should_publish = match &last_docker_result {
-                        Some(prev) => prev != &result,
-                        None => true,
-                    };
+                let response_payload = json!({
+                    "type": "dashboard",
+                    "action": action,
+                    "success": success,
+                    "output": result,
+                    "agent": AGENT_CLIENT_ID
+                });
 
-                    last_docker_result = Some(result.clone());
-
-                    if !should_publish {
-                        info!("⏭️  docker_info sin cambios");
-                        continue;
-                    }
-
-                    // ✅ NUEVO: Parsear result y agregar full_state + delta
-                    let output_payload = if let Ok(full_state) =
-                        serde_json::from_str::<serde_json::Value>(&result)
-                    {
-                        json!({
-                            "full_state": full_state,
-                            "delta": {
-                                "added": [],
-                                "removed": [],
-                                "changed": []
-                            },
-                            "timestamp": chrono::Utc::now().to_rfc3339()
-                        })
-                    } else {
-                        json!({ "error": result })
-                    };
-
-                    let response_payload = json!({
-                        "type": "dashboard",
-                        "action": "docker_info",
-                        "success": success,
-                        "output": output_payload.to_string(),  // ✅ output es un string con full_state+delta
-                        "agent": AGENT_CLIENT_ID
-                    });
-
-                    if let Err(e) = publish_to_core(
-                        &core_rest_url_clone_docker,
-                        &events_channel_id_clone_docker,
-                        response_payload,
-                    )
-                    .await
-                    {
-                        error!("❌ Error publicando docker_info: {}", e);
-                    }
+                if let Err(e) = publish_to_core(
+                    &core_rest_url_clone,
+                    &events_channel_id_clone,
+                    response_payload,
+                )
+                .await
+                {
+                    error!("❌ Error publicando dashboard '{}': {}", action, e);
                 }
             }
         }
     });
 
-    // TAREA: Docker Info (cada 5 segundos, en thread dedicado)
+    // 👇 TAREA: Docker Info (SPAWN SEPARADO, no dentro del dashboard)
     let events_channel_id_clone_docker = events_channel_id.clone();
     let core_rest_url_clone_docker = core_rest_url.clone();
 
     tokio::spawn(async move {
         info!("🐳 Iniciando loop de Docker Info (cada 5s, async)...");
-        let mut interval_docker = interval(Duration::from_secs(5));
+        let mut interval_docker = interval(Duration::from_secs(5)); // 👈 NOMBRE DIFERENTE
         let mut last_docker_result: Option<String> = None;
 
         loop {
             interval_docker.tick().await;
 
-            // Ejecutar en thread separado (no bloquea el async loop)
             let docker_result = tokio::task::spawn_blocking(|| {
                 commands::execute_action("docker_info", &serde_json::Value::Null)
             })
             .await;
 
             if let Ok((success, result)) = docker_result {
-                // Deduplicación
                 let should_publish = match &last_docker_result {
                     Some(prev) => prev != &result,
                     None => true,
@@ -408,27 +457,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                // ✅ Parsear result y agregar full_state + delta
-                let output_payload =
-                    if let Ok(full_state) = serde_json::from_str::<serde_json::Value>(&result) {
-                        json!({
-                            "full_state": full_state,
-                            "delta": {
-                                "added": [],
-                                "removed": [],
-                                "changed": []
-                            },
-                            "timestamp": chrono::Utc::now().to_rfc3339()
-                        })
-                    } else {
-                        json!({ "error": result })
-                    };
-
                 let response_payload = json!({
                     "type": "dashboard",
                     "action": "docker_info",
                     "success": success,
-                    "output": output_payload.to_string(),
+                    "output": result,
                     "agent": AGENT_CLIENT_ID
                 });
 
