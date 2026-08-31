@@ -432,6 +432,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+
+        // TAREA: Docker Info (cada 5 segundos, separado)
+        let events_channel_id_clone_docker = events_channel_id.clone();
+        let core_rest_url_clone_docker = core_rest_url.clone();
+
+        tokio::spawn(async move {
+            info!("🐳 Iniciando loop de Docker Info (cada 5s)...");
+            let mut interval = interval(Duration::from_secs(5));
+            let mut last_docker_result: Option<String> = None;
+
+            loop {
+                interval.tick().await;
+
+                // Ejecutar en thread separado (no bloquea el async loop)
+                let docker_result = tokio::task::spawn_blocking(|| {
+                    commands::execute_action("docker_info", &serde_json::Value::Null)
+                })
+                .await;
+
+                if let Ok((success, result)) = docker_result {
+                    // Deduplicación
+                    let should_publish = match &last_docker_result {
+                        Some(prev) => prev != &result,
+                        None => true,
+                    };
+
+                    last_docker_result = Some(result.clone());
+
+                    if !should_publish {
+                        info!("⏭️  docker_info sin cambios");
+                        continue;
+                    }
+
+                    let response_payload = json!({
+                        "type": "dashboard",
+                        "action": "docker_info",
+                        "success": success,
+                        "output": result,
+                        "agent": AGENT_CLIENT_ID
+                    });
+
+                    if let Err(e) = publish_to_core(
+                        &core_rest_url_clone_docker,
+                        &events_channel_id_clone_docker,
+                        response_payload,
+                    )
+                    .await
+                    {
+                        error!("❌ Error publicando docker_info: {}", e);
+                    }
+                }
+            }
+        });
     });
 
     // TAREA: Nginx programado (cada 5 minutos)
