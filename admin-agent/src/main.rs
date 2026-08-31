@@ -436,14 +436,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 👇 TAREA: Docker Info (SPAWN SEPARADO, no dentro del dashboard)
+    // 👇 TAREA: Docker Info (SPAWN SEPARADO, con cálculo de delta)
     let events_channel_id_clone_docker = events_channel_id.clone();
     let core_rest_url_clone_docker = core_rest_url.clone();
 
     tokio::spawn(async move {
         info!("🐳 Iniciando loop de Docker Info (cada 5s, async)...");
-        let mut interval_docker = interval(Duration::from_secs(5)); // 👈 NOMBRE DIFERENTE
+        let mut interval_docker = interval(Duration::from_secs(5));
         let mut last_docker_result: Option<String> = None;
+        let mut last_docker_parsed: Option<serde_json::Value> = None; // <-- NUEVO
 
         loop {
             interval_docker.tick().await;
@@ -454,26 +455,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
             if let Ok((success, result)) = docker_result {
+                // 1. Parsear el resultado actual para poder calcular el delta
+                let current_parsed = match serde_json::from_str::<serde_json::Value>(&result) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("❌ Error parseando docker_info: {}", e);
+                        continue;
+                    }
+                };
+
+                // 2. Calcular delta comparando con el estado anterior
+                let delta = calculate_docker_delta(&last_docker_parsed, &current_parsed);
+
+                // 3. Decidir si publicar (solo si el output cambió o si es la primera vez)
                 let should_publish = match &last_docker_result {
                     Some(prev) => prev != &result,
                     None => true,
                 };
 
+                // 4. Actualizar el estado anterior (Siempre, para futuras comparaciones)
                 last_docker_result = Some(result.clone());
+                last_docker_parsed = Some(current_parsed.clone());
 
                 if !should_publish {
-                    info!("⏭️  docker_info sin cambios");
+                    info!("⏭️  docker_info sin cambios en el contenido, omitiendo publicación");
                     continue;
                 }
 
+                // 5. Construir payload con output + delta + timestamp
                 let response_payload = json!({
                     "type": "dashboard",
                     "action": "docker_info",
                     "success": success,
                     "output": result,
+                    "delta": delta,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
                     "agent": AGENT_CLIENT_ID
                 });
 
+                // 6. Publicar al core
                 if let Err(e) = publish_to_core(
                     &core_rest_url_clone_docker,
                     &events_channel_id_clone_docker,
