@@ -101,23 +101,25 @@ pub fn execute_action(action: &str, _payload: &Value) -> (bool, String) {
             }
         }
         "nginx_full" => {
-            // Script nativo sin Docker
+            // Script nativo con sudo para todos los comandos sensibles
             let script = r#"
-echo '=== SITES ===';
-grep -rh '^\s*server_name\s' /etc/nginx/ 2>/dev/null | awk '{print $2}' | tr -d ';' | sort -u;
+sudo sh -c '
+echo "=== SITES ===";
+grep -rh "^\s*server_name\s" /etc/nginx/ 2>/dev/null | awk "{print \$2}" | tr -d ";" | sort -u;
 
-echo '=== CERTS ===';
-sudo certbot certificates --text --noninteractive 2>/dev/null |
-    awk '/Certificate Name:/ {domain=$3} /Expiry Date:/ {print domain "|" $4 " " $5 " " $6 " " $7}';
+echo "=== CERTS ===";
+certbot certificates --text --noninteractive 2>/dev/null |
+    awk "/Certificate Name:/ {domain=\$3} /Expiry Date:/ {print domain \"|\" \$4 \" \" \$5 \" \" \$6 \" \" \$7}";
 
-echo '=== PORTS ===';
-ss -tlnp 2>/dev/null | awk '/:(80|443)/ {print $4}' | sort -u;
+echo "=== PORTS ===";
+ss -tlnp 2>/dev/null | awk "/(80|443)/ {print \$4}" | sort -u;
 
-echo '=== ERRORS ===';
-tail -20 /var/log/nginx/error.log 2>/dev/null | grep -iE '\[error\]|\[warn\]' | tail -10;
+echo "=== ERRORS ===";
+tail -20 /var/log/nginx/error.log 2>/dev/null | grep -iE "\[error\]|\[warn\]" | tail -10;
 
-echo '=== NGINX ACTIVE ===';
+echo "=== NGINX ACTIVE ===";
 systemctl is-active nginx 2>/dev/null || echo "inactive";
+'
     "#;
 
             let output = std::process::Command::new("sh")
