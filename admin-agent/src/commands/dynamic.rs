@@ -101,42 +101,28 @@ pub fn execute_action(action: &str, _payload: &Value) -> (bool, String) {
             }
         }
         "nginx_full" => {
-            let output = std::process::Command::new("docker")
-                .args([
-                    "run",
-                    "--rm",
-                    "--net=host",
-                    "-v",
-                    "/etc/nginx:/etc/nginx:ro",
-                    "-v",
-                    "/etc/letsencrypt:/etc/letsencrypt:ro",
-                    "-v",
-                    "/var/log/nginx:/var/log/nginx:ro",
-                    "alpine",
-                    "sh",
-                    "-c",
-                    r#"
-apk add --no-cache openssl curl iproute2 > /dev/null 2>&1;
-
+            // Script nativo sin Docker
+            let script = r#"
 echo '=== SITES ===';
 grep -rh '^\s*server_name\s' /etc/nginx/ 2>/dev/null | awk '{print $2}' | tr -d ';' | sort -u;
 
 echo '=== CERTS ===';
-for f in /etc/letsencrypt/live/*/fullchain.pem; do
-    if [ -f "$f" ]; then
-        domain=$(basename $(dirname "$f"));
-        expiry=$(openssl x509 -in "$f" -noout -enddate 2>/dev/null | cut -d= -f2);
-        echo "$domain|$expiry";
-    fi;
-done;
+sudo certbot certificates --text --noninteractive 2>/dev/null |
+    awk '/Certificate Name:/ {domain=$3} /Expiry Date:/ {print domain "|" $4 " " $5 " " $6 " " $7}';
 
 echo '=== PORTS ===';
 ss -tlnp 2>/dev/null | awk '/:(80|443)/ {print $4}' | sort -u;
 
 echo '=== ERRORS ===';
 tail -20 /var/log/nginx/error.log 2>/dev/null | grep -iE '\[error\]|\[warn\]' | tail -10;
-                    "#,
-                ])
+
+echo '=== NGINX ACTIVE ===';
+systemctl is-active nginx 2>/dev/null || echo "inactive";
+    "#;
+
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(script)
                 .output();
 
             match output {
@@ -146,6 +132,7 @@ tail -20 /var/log/nginx/error.log 2>/dev/null | grep -iE '\[error\]|\[warn\]' | 
                     let mut certs = Vec::new();
                     let mut ports = Vec::new();
                     let mut errors = Vec::new();
+                    let mut nginx_active = "unknown".to_string();
                     let mut section = "";
 
                     for line in stdout.lines() {
@@ -163,6 +150,10 @@ tail -20 /var/log/nginx/error.log 2>/dev/null | grep -iE '\[error\]|\[warn\]' | 
                         }
                         if line.starts_with("=== ERRORS ===") {
                             section = "errors";
+                            continue;
+                        }
+                        if line.starts_with("=== NGINX ACTIVE ===") {
+                            section = "nginx_active";
                             continue;
                         }
 
@@ -192,21 +183,33 @@ tail -20 /var/log/nginx/error.log 2>/dev/null | grep -iE '\[error\]|\[warn\]' | 
                                     errors.push(line.trim().to_string());
                                 }
                             }
+                            "nginx_active" => {
+                                nginx_active = line.trim().to_string();
+                            }
                             _ => {}
                         }
                     }
+
+                    let status = if ports.iter().any(|p| p.contains(":443"))
+                        || ports.iter().any(|p| p.contains(":80"))
+                    {
+                        "healthy"
+                    } else {
+                        "warning"
+                    };
 
                     let response = serde_json::json!({
                         "sites": sites,
                         "certs": certs,
                         "ports": ports,
                         "errors": errors,
-                        "status": if ports.iter().any(|p| p.contains(":443")) || ports.iter().any(|p| p.contains(":80")) { "healthy" } else { "warning" }
+                        "status": status,
+                        "nginx_active": nginx_active
                     });
 
                     (true, response.to_string())
                 }
-                Err(e) => (false, format!("Error ejecutando docker: {}", e)),
+                Err(e) => (false, format!("Error ejecutando script nativo: {}", e)),
             }
         }
         "uptime_check" => {

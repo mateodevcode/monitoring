@@ -507,29 +507,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     // TAREA: Nginx programado (cada 5 minutos)
-    // let events_channel_id_clone_nginx = events_channel_id.clone();
-    // let core_rest_url_clone_nginx = core_rest_url.clone();
-    // tokio::spawn(async move {
-    //     let mut interval = interval(Duration::from_secs(300));
-    //     loop {
-    //         interval.tick().await;
-    //         info!("🔄 Ejecutando chequeo programado de Nginx...");
-    //         let (success, result) =
-    //             commands::execute_action("nginx_full", &serde_json::Value::Null);
-    //         let _ = publish_to_core(
-    //             &core_rest_url_clone_nginx,
-    //             &events_channel_id_clone_nginx,
-    //             json!({
-    //                 "type": "dashboard",
-    //                 "action": "nginx_full",
-    //                 "success": success,
-    //                 "output": result,
-    //                 "agent": AGENT_CLIENT_ID
-    //             }),
-    //         )
-    //         .await;
-    //     }
-    // });
+    let events_channel_id_clone_nginx = events_channel_id.clone();
+    let core_rest_url_clone_nginx = core_rest_url.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            info!("🔄 Ejecutando chequeo programado de Nginx...");
+            let (success, result) =
+                commands::execute_action("nginx_full", &serde_json::Value::Null);
+            let _ = publish_to_core(
+                &core_rest_url_clone_nginx,
+                &events_channel_id_clone_nginx,
+                json!({
+                    "type": "dashboard",
+                    "action": "nginx_full",
+                    "success": success,
+                    "output": result,
+                    "agent": AGENT_CLIENT_ID
+                }),
+            )
+            .await;
+        }
+    });
 
     // TAREA: WebSocket Listener (comandos manuales)
     let events_channel_id_clone_ws = events_channel_id.clone();
