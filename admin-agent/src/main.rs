@@ -14,7 +14,6 @@ use futures_util::{SinkExt, StreamExt};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -359,6 +358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TAREA: Loop de Dashboard (cada 5 segundos)
     // TAREA: Loop de Dashboard (cada 5 segundos)
     // TAREA: Loop de Dashboard (cada 5 segundos)
+    // TAREA: Loop de Dashboard (cada 5 segundos)
     let events_channel_id_clone = events_channel_id.clone();
     let core_rest_url_clone = core_rest_url.clone();
     let db_conn_clone = db_conn.clone();
@@ -378,7 +378,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for action in commands::DYNAMIC_ACTIONS {
                 let (success, result) = commands::execute_action(action, &serde_json::Value::Null);
 
-                // ✅ DEDUPLICACIÓN: Solo publica si cambió o es la primera vez
                 let should_publish = match last_results.get(*action) {
                     Some(prev) => prev != &result,
                     None => true,
@@ -386,13 +385,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 last_results.insert(action.to_string(), result.clone());
 
-                // ⏭️ Si no hay cambios, saltea esta acción
                 if !should_publish {
                     info!("⏭️  '{}' sin cambios, omitiendo publicación", action);
                     continue;
                 }
 
-                // 🔥 Procesamiento especial para network_threats (guardar en BD)
                 if *action == "network_threats" && success {
                     if let Ok(threats_json) = serde_json::from_str::<serde_json::Value>(&result) {
                         if let Some(threats) = threats_json["threats"].as_array() {
@@ -412,7 +409,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // 📤 PUBLICAR RESULTADO (igual para TODAS las acciones)
                 let response_payload = json!({
                     "type": "dashboard",
                     "action": action,
@@ -432,61 +428,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-
-        // TAREA: Docker Info (cada 5 segundos, separado)
-        let events_channel_id_clone_docker = events_channel_id.clone();
-        let core_rest_url_clone_docker = core_rest_url.clone();
-
-        tokio::spawn(async move {
-            info!("🐳 Iniciando loop de Docker Info (cada 5s)...");
-            let mut interval = interval(Duration::from_secs(5));
-            let mut last_docker_result: Option<String> = None;
-
-            loop {
-                interval.tick().await;
-
-                // Ejecutar en thread separado (no bloquea el async loop)
-                let docker_result = tokio::task::spawn_blocking(|| {
-                    commands::execute_action("docker_info", &serde_json::Value::Null)
-                })
-                .await;
-
-                if let Ok((success, result)) = docker_result {
-                    // Deduplicación
-                    let should_publish = match &last_docker_result {
-                        Some(prev) => prev != &result,
-                        None => true,
-                    };
-
-                    last_docker_result = Some(result.clone());
-
-                    if !should_publish {
-                        info!("⏭️  docker_info sin cambios");
-                        continue;
-                    }
-
-                    let response_payload = json!({
-                        "type": "dashboard",
-                        "action": "docker_info",
-                        "success": success,
-                        "output": result,
-                        "agent": AGENT_CLIENT_ID
-                    });
-
-                    if let Err(e) = publish_to_core(
-                        &core_rest_url_clone_docker,
-                        &events_channel_id_clone_docker,
-                        response_payload,
-                    )
-                    .await
-                    {
-                        error!("❌ Error publicando docker_info: {}", e);
-                    }
-                }
-            }
-        });
     });
 
+    // 👇 TAREA: Docker Info (SPAWN SEPARADO, no dentro del dashboard)
+    let events_channel_id_clone_docker = events_channel_id.clone();
+    let core_rest_url_clone_docker = core_rest_url.clone();
+
+    tokio::spawn(async move {
+        info!("🐳 Iniciando loop de Docker Info (cada 5s, async)...");
+        let mut interval_docker = interval(Duration::from_secs(5)); // 👈 NOMBRE DIFERENTE
+        let mut last_docker_result: Option<String> = None;
+
+        loop {
+            interval_docker.tick().await;
+
+            let docker_result = tokio::task::spawn_blocking(|| {
+                commands::execute_action("docker_info", &serde_json::Value::Null)
+            })
+            .await;
+
+            if let Ok((success, result)) = docker_result {
+                let should_publish = match &last_docker_result {
+                    Some(prev) => prev != &result,
+                    None => true,
+                };
+
+                last_docker_result = Some(result.clone());
+
+                if !should_publish {
+                    info!("⏭️  docker_info sin cambios");
+                    continue;
+                }
+
+                let response_payload = json!({
+                    "type": "dashboard",
+                    "action": "docker_info",
+                    "success": success,
+                    "output": result,
+                    "agent": AGENT_CLIENT_ID
+                });
+
+                if let Err(e) = publish_to_core(
+                    &core_rest_url_clone_docker,
+                    &events_channel_id_clone_docker,
+                    response_payload,
+                )
+                .await
+                {
+                    error!("❌ Error publicando docker_info: {}", e);
+                }
+            }
+        }
+    });
     // TAREA: Nginx programado (cada 5 minutos)
     // let events_channel_id_clone_nginx = events_channel_id.clone();
     // let core_rest_url_clone_nginx = core_rest_url.clone();
