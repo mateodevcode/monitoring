@@ -10,7 +10,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc}; // renombramos para evitar conflicto
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, Duration as TokioDuration}; // usamos TokioDuration para intervalos
 use tokio_tungstenite::connect_async;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tracing::{error, info, warn};
@@ -447,7 +447,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "📊 Iniciando loop dinámico (cada {} segundos)...",
             DASHBOARD_INTERVAL_SECS
         );
-        let mut interval = interval(Duration::from_secs(DASHBOARD_INTERVAL_SECS));
+        let mut interval = interval(TokioDuration::from_secs(DASHBOARD_INTERVAL_SECS));
         let mut last_results: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
@@ -524,7 +524,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         info!("🐳 Iniciando loop de Docker Info (cada 5s, async)...");
-        let mut interval_docker = interval(Duration::from_secs(5));
+        let mut interval_docker = interval(TokioDuration::from_secs(5));
         let mut last_docker_result: Option<String> = None;
         let mut last_docker_parsed: Option<serde_json::Value> = None; // <-- NUEVO
 
@@ -598,7 +598,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         info!("🛡️ Iniciando loop de amenazas de red (cada 2s)...");
-        let mut interval_threats = interval(Duration::from_secs(2));
+        let mut interval_threats = interval(TokioDuration::from_secs(2));
         let mut last_threats_result: Option<String> = None;
         let geo_cache_clone = geo_cache.clone();
 
@@ -660,7 +660,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut cache_guard = geo_cache_clone.lock().await;
                     for (ip, country) in batch_results {
                         if country != "XX" {
-                            cache_guard.insert(ip, (country, Utc::now() + Duration::hours(1)));
+                            cache_guard.insert(
+                                ip.to_string(),
+                                (country.clone(), Utc::now() + ChronoDuration::hours(1)),
+                            );
                         }
                     }
                 }
@@ -752,7 +755,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let events_channel_id_clone_nginx = events_channel_id.clone();
     let core_rest_url_clone_nginx = core_rest_url.clone();
     tokio::spawn(async move {
-        let mut interval = interval(Duration::from_secs(300));
+        let mut interval = interval(TokioDuration::from_secs(300));
         loop {
             interval.tick().await;
             info!("🔄 Ejecutando chequeo programado de Nginx...");
