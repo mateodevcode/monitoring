@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-// Estructura para una línea de log parseada
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub ip: String,
@@ -17,15 +16,12 @@ pub struct LogEntry {
     pub timestamp: DateTime<FixedOffset>,
 }
 
-// Patrón regex para el log combinado estándar
-// Ejemplo: 172.18.0.4 - - [01/Sep/2026:00:00:09 +0200] "HEAD / HTTP/1.1" 200 0 "-" "ureq/2.12.1"
 lazy_static::lazy_static! {
     static ref LOG_RE: Regex = Regex::new(
         r#"^(\S+) - - \[([^\]]+)\] "([^"]*)" (\d{3}) \d+ "([^"]*)" "([^"]*)""#
     ).unwrap();
 }
 
-/// Parsea una línea del access.log en un LogEntry
 pub fn parse_log_line(line: &str) -> Option<LogEntry> {
     let caps = LOG_RE.captures(line)?;
     let ip = caps[1].to_string();
@@ -54,7 +50,6 @@ pub fn parse_log_line(line: &str) -> Option<LogEntry> {
     })
 }
 
-/// Convierte el timestamp de Nginx a DateTime<FixedOffset>
 fn parse_nginx_timestamp(ts: &str) -> Option<DateTime<FixedOffset>> {
     // Formato: "01/Sep/2026:00:00:09 +0200"
     let fmt = "%d/%b/%Y:%H:%M:%S %z";
@@ -64,7 +59,6 @@ fn parse_nginx_timestamp(ts: &str) -> Option<DateTime<FixedOffset>> {
     }
 }
 
-/// Lee las últimas N líneas del archivo de log
 pub fn read_last_lines(path: &str, n: usize) -> Vec<String> {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -79,7 +73,6 @@ pub fn read_last_lines(path: &str, n: usize) -> Vec<String> {
     }
 }
 
-/// Analiza el access.log y devuelve un vector de amenazas, excluyendo IPs en whitelist
 pub fn analyze_logs_with_whitelist(
     path: &str,
     window_secs: i64,
@@ -139,7 +132,6 @@ pub fn analyze_logs_with_whitelist(
     results
 }
 
-/// Clasifica el nivel de amenaza basado en heurísticas
 fn classify_threat(
     _ip: &str,
     count: usize,
@@ -209,7 +201,6 @@ fn classify_threat(
     }
 }
 
-/// Verifica si una IP es privada o local
 fn is_private_ip(ip: &str) -> bool {
     ip.starts_with("127.")
         || ip.starts_with("10.")

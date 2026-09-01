@@ -31,9 +31,8 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
         [],
     )?;
 
-    // 👇 AGREGA SOLO ESTA LÍNEA AL FINAL
-    init_whitelist(&conn)?;
     init_ip_stats(&conn)?;
+    init_whitelist(&conn)?;
 
     Ok(conn)
 }
@@ -108,7 +107,6 @@ pub fn clear_threats(conn: &Connection) -> Result<usize> {
     Ok(deleted)
 }
 
-// Nueva tabla para whitelist de IPs propias
 pub fn init_whitelist(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS admin_whitelist (
@@ -134,66 +132,6 @@ pub fn get_whitelist(conn: &Connection) -> Result<Vec<String>> {
     Ok(ips.filter_map(|r| r.ok()).collect())
 }
 
-// Nueva función para Top Atacantes
-pub fn get_top_attackers(conn: &Connection, limit: usize) -> Result<Vec<serde_json::Value>> {
-    let whitelist = get_whitelist(conn)?;
-    let whitelist_str = whitelist
-        .iter()
-        .map(|ip| format!("'{}'", ip))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let where_clause = if whitelist_str.is_empty() {
-        "".to_string()
-    } else {
-        format!("WHERE ip NOT IN ({})", whitelist_str)
-    };
-
-    let query = format!(
-        "SELECT 
-            ip,
-            country,
-            SUM(connections) as total_connections,
-            GROUP_CONCAT(DISTINCT ports) as all_ports,
-            MIN(timestamp) as first_seen,
-            MAX(timestamp) as last_seen,
-            MAX(CASE 
-                WHEN level = 'CRITICAL' THEN 3
-                WHEN level = 'WARNING' THEN 2
-                ELSE 1
-            END) as max_level_num
-         FROM network_threats
-         {}
-         GROUP BY ip
-         ORDER BY total_connections DESC
-         LIMIT ?1",
-        where_clause
-    );
-
-    let mut stmt = conn.prepare(&query)?;
-    let rows = stmt.query_map([limit as i32], |row| {
-        let max_level_num: i32 = row.get(6)?;
-        let max_level = match max_level_num {
-            3 => "CRITICAL",
-            2 => "WARNING",
-            _ => "SAFE",
-        };
-
-        Ok(serde_json::json!({
-            "ip": row.get::<_, String>(0)?,
-            "country": row.get::<_, String>(1)?,
-            "total_connections": row.get::<_, i64>(2)?,
-            "ports": row.get::<_, String>(3)?,
-            "first_seen": row.get::<_, String>(4)?,
-            "last_seen": row.get::<_, String>(5)?,
-            "level": max_level
-        }))
-    })?;
-
-    Ok(rows.filter_map(|r| r.ok()).collect())
-}
-
-// Agregar al final del archivo db.rs (después de las funciones existentes)
 pub fn init_ip_stats(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ip_stats (
@@ -211,7 +149,6 @@ pub fn init_ip_stats(conn: &Connection) -> Result<()> {
         [],
     )?;
 
-    // Índice para consultas rápidas por total_connections
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ip_stats_total ON ip_stats (total_connections DESC)",
         [],
@@ -234,7 +171,6 @@ pub fn upsert_ip_stat(
     let methods_str = methods.join(",");
     let urls_str = urls.join(",");
 
-    // Usamos INSERT OR REPLACE para actualizar o insertar
     conn.execute(
         "INSERT OR REPLACE INTO ip_stats 
          (ip, country, total_connections, ports, first_seen, last_seen, level, methods, urls, last_updated)
@@ -254,7 +190,7 @@ pub fn upsert_ip_stat(
             country,
             &connections.to_string(),
             ports,
-            &now, // first_seen si no existe, sino se mantiene la anterior
+            &now,
             level,
             &methods_str,
             &urls_str,

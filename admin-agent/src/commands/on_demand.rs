@@ -299,33 +299,25 @@ check redis-server Redis databases
             Err(e) => (false, format!("Error ejecutando docker: {}", e)),
         }
     } else if action == "network_threats" {
-        // Obtener whitelist desde DB (necesitamos acceso a la DB)
-        // Como execute_action no tiene acceso a la DB, lo manejaremos en main.rs.
-        // Alternativa: pasar la DB como parámetro, pero para simplificar, usaremos una función que
-        // acepte un closure o usaremos una variable global (no recomendado).
-        // La mejor opción: desde main.rs, cuando se ejecute network_threats, pasarle la DB.
-        // Sin embargo, execute_action es independiente. Podemos hacer que network_threats sea un
-        // comando especial que se maneje en main.rs, pero también podemos usar una función que
-        // reciba un callback.
-        // Para este ejemplo, voy a implementar una versión que lee el access.log y devuelve el JSON
-        // sin whitelist, y luego en main.rs filtramos o agregamos whitelist.
-        // Pero para mantenerlo simple, voy a leer el access.log y devolver los datos sin filtrar.
-        // Luego en el loop dinámico, al recibir el resultado, se puede filtrar y guardar en DB.
-        // Es más limpio.
-
-        // Leer access.log y devolver análisis
+        // Usar log_analyzer para analizar access.log
         let log_path = "/var/log/nginx/access.log";
         let window_secs = 5;
         let limit = 50;
 
-        // Usar la función analyze_logs (sin whitelist)
-        let threats = crate::commands::log_analyzer::analyze_logs(log_path, window_secs, limit);
+        // Obtener whitelist actual (se pasará desde el llamador, pero aquí no tenemos acceso a la DB)
+        // Para simplificar, usaremos una lista vacía y el llamador (main.rs) filtrará
+        // o mejor: devolvemos todos los datos y main.rs los procesa con whitelist.
+        // Pero como execute_action no tiene acceso a la DB, devolvemos los datos sin filtrar.
+        let whitelist: Vec<String> = Vec::new();
+        let threats = crate::commands::log_analyzer::analyze_logs_with_whitelist(
+            log_path,
+            window_secs,
+            limit,
+            &whitelist,
+        );
         (true, json!({ "threats": threats }).to_string())
     } else if action == "set_admin_ip" {
-        // Este comando se llama desde el frontend para marcar la IP propia
         if let Some(ip) = payload.get("ip").and_then(|v| v.as_str()) {
-            // Necesitamos acceso a la DB, pero execute_action no la tiene
-            // Solución: lo manejamos en main.rs directamente
             (
                 true,
                 json!({"ip": ip, "message": "IP agregada a whitelist"}).to_string(),
@@ -334,8 +326,8 @@ check redis-server Redis databases
             (false, "No se proporcionó IP".to_string())
         }
     } else if action == "get_top_attackers" {
-        // Similar, necesitamos acceso a la DB
-        (true, "NEED_DB_ACCESS".to_string()) // Placeholder, lo manejamos en main.rs
+        // Este se maneja en main.rs, pero por si acaso devolvemos placeholder
+        (true, "NEED_DB_ACCESS".to_string())
     } else if let Some(&(_, program, args)) =
         ALLOWED_COMMANDS.iter().find(|&&(cmd, _, _)| cmd == action)
     {

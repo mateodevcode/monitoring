@@ -51,28 +51,19 @@ pub fn execute_safe_command(program: &str, args: &[&str]) -> (bool, String) {
     }
 }
 
-// ==========================================
-// ROUTER UNIFICADO (Para compatibilidad con WebSocket manual)
-// ==========================================
-
 pub fn execute_action(action: &str, payload: &Value) -> (bool, String) {
-    // 1. Intentar en dinámicos
     if let res @ (true, _) = dynamic::execute_action(action, payload) {
         return res;
     }
-    // 2. Intentar en fijos
     if let res @ (true, _) = fixed::execute_action(action, payload) {
         return res;
     }
-    // 3. Intentar en bajo demanda (whitelist)
     on_demand::execute_action(action, payload)
 }
 
-// Listas para que main.rs sepa qué iterar
 pub const DYNAMIC_ACTIONS: &[&str] = &[
     "ram_info",
     "disk_space",
     "uptime_check",
     "get_active_connections",
-    // "network_threats",
 ];
