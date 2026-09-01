@@ -514,8 +514,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_conn_clone_threats = db_conn.clone();
 
     tokio::spawn(async move {
-        info!("🛡️ Iniciando loop de amenazas de red (cada 5s)...");
-        let mut interval_threats = interval(Duration::from_secs(5));
+        info!("🛡️ Iniciando loop de amenazas de red (cada 2s)...");
+        let mut interval_threats = interval(Duration::from_secs(2));
         let mut last_threats_result: Option<String> = None;
 
         loop {
