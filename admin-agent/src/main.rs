@@ -10,10 +10,12 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -264,6 +266,86 @@ fn calculate_docker_delta(
     })
 }
 
+// Caché de geolocalización: IP -> (país, timestamp de expiración)
+type GeoCache = Arc<Mutex<HashMap<String, (String, DateTime<Utc>)>>>;
+
+fn create_geo_cache() -> GeoCache {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Obtiene el país de una IP usando caché o consultando la API.
+/// Si está en caché y no ha expirado, devuelve el país.
+/// Si no, consulta la API (pero esta función solo se usa para casos individuales).
+async fn get_country_cached(ip: &str, cache: &GeoCache) -> String {
+    // Revisar caché
+    {
+        let cache_guard = cache.lock().await;
+        if let Some((country, expires_at)) = cache_guard.get(ip) {
+            if *expires_at > Utc::now() {
+                return country.clone();
+            }
+        }
+    }
+    // Si no está en caché, llamar a la API (individual, solo para casos puntuales)
+    let country = get_country_for_ip(ip)
+        .await
+        .unwrap_or_else(|| "XX".to_string());
+    if country != "XX" {
+        let mut cache_guard = cache.lock().await;
+        cache_guard.insert(
+            ip.to_string(),
+            (country.clone(), Utc::now() + Duration::hours(1)),
+        );
+    }
+    country
+}
+
+/// Obtiene países para múltiples IPs en una sola petición batch.
+async fn get_countries_batch(ips: &[String]) -> HashMap<String, String> {
+    if ips.is_empty() {
+        return HashMap::new();
+    }
+
+    let url = "http://ip-api.com/batch?fields=countryCode";
+    let payload = serde_json::json!(ips);
+
+    match reqwest::Client::new()
+        .post(url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                let mut results = HashMap::new();
+                if let Some(arr) = json.as_array() {
+                    for (i, item) in arr.iter().enumerate() {
+                        if i < ips.len() {
+                            let ip = &ips[i];
+                            let country =
+                                item["countryCode"].as_str().unwrap_or("XX").to_uppercase();
+                            results.insert(ip.clone(), country);
+                        }
+                    }
+                }
+                results
+            } else {
+                // Si falla el parseo, devolver XX para todas
+                ips.iter()
+                    .map(|ip| (ip.clone(), "XX".to_string()))
+                    .collect()
+            }
+        }
+        Err(e) => {
+            tracing::warn!("❌ Error en batch geolocation: {}", e);
+            ips.iter()
+                .map(|ip| (ip.clone(), "XX".to_string()))
+                .collect()
+        }
+    }
+}
+
 // ============================================
 // FUNCIÓN PRINCIPAL - INTEGRADA
 // ============================================
@@ -512,11 +594,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let events_channel_id_clone_threats = events_channel_id.clone();
     let core_rest_url_clone_threats = core_rest_url.clone();
     let db_conn_clone_threats = db_conn.clone();
+    let geo_cache = create_geo_cache();
 
     tokio::spawn(async move {
         info!("🛡️ Iniciando loop de amenazas de red (cada 2s)...");
         let mut interval_threats = interval(Duration::from_secs(2));
         let mut last_threats_result: Option<String> = None;
+        let geo_cache_clone = geo_cache.clone();
 
         loop {
             interval_threats.tick().await;
@@ -541,6 +625,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let empty_vec = Vec::new();
             let threats = parsed["threats"].as_array().unwrap_or(&empty_vec);
 
+            // Dentro del loop de network_threats, después de obtener `threats`
             if !threats.is_empty() {
                 let db = db_conn_clone_threats.lock().await;
                 let whitelist = match db::get_whitelist(&db) {
@@ -551,8 +636,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
+                // 1. Recolectar IPs que no están en whitelist y que necesitan geolocalización
+                let mut ips_to_geolocate = Vec::new();
+                let mut threat_map = HashMap::new();
                 for threat in threats {
                     let ip = threat["ip"].as_str().unwrap_or("").to_string();
+                    if whitelist.contains(&ip) {
+                        continue;
+                    }
+                    threat_map.insert(ip.clone(), threat.clone());
+
+                    // Verificar si está en caché
+                    let cached_country = get_country_cached(&ip, &geo_cache_clone).await;
+                    if cached_country == "XX" && !ips_to_geolocate.contains(&ip) {
+                        ips_to_geolocate.push(ip);
+                    }
+                }
+
+                // 2. Si hay IPs para geolocalizar, hacer una sola petición batch
+                if !ips_to_geolocate.is_empty() {
+                    let batch_results = get_countries_batch(&ips_to_geolocate).await;
+                    // Guardar resultados en caché
+                    let mut cache_guard = geo_cache_clone.lock().await;
+                    for (ip, country) in batch_results {
+                        if country != "XX" {
+                            cache_guard.insert(ip, (country, Utc::now() + Duration::hours(1)));
+                        }
+                    }
+                }
+
+                // 3. Procesar todas las IPs (ahora con caché actualizada)
+                for (ip, threat) in threat_map {
                     if whitelist.contains(&ip) {
                         continue;
                     }
@@ -572,9 +686,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect();
 
-                    let country = get_country_for_ip(&ip)
-                        .await
-                        .unwrap_or_else(|| "XX".to_string());
+                    // Obtener país de caché (ya debería estar)
+                    let country = get_country_cached(&ip, &geo_cache_clone).await;
 
                     // Actualizar ip_stats
                     if let Err(e) = db::upsert_ip_stat(
@@ -582,7 +695,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &ip,
                         &country,
                         connections,
-                        "80,443",
+                        "80,443", // por defecto, luego podemos mejorar con get_active_connections
                         &level,
                         &methods,
                         &urls,
