@@ -299,190 +299,28 @@ check redis-server Redis databases
             Err(e) => (false, format!("Error ejecutando docker: {}", e)),
         }
     } else if action == "network_threats" {
-        let output = std::process::Command::new("docker")
-            .args([
-                "run", "--rm", "--net=host", "-v", "/var/log:/host/var/log:ro", "alpine", "sh", "-c",
-                r#"
-apk add --no-cache iproute2 curl grep awk whois coreutils util-linux > /dev/null 2>&1
+        // Obtener whitelist desde DB (necesitamos acceso a la DB)
+        // Como execute_action no tiene acceso a la DB, lo manejaremos en main.rs.
+        // Alternativa: pasar la DB como parámetro, pero para simplificar, usaremos una función que
+        // acepte un closure o usaremos una variable global (no recomendado).
+        // La mejor opción: desde main.rs, cuando se ejecute network_threats, pasarle la DB.
+        // Sin embargo, execute_action es independiente. Podemos hacer que network_threats sea un
+        // comando especial que se maneje en main.rs, pero también podemos usar una función que
+        // reciba un callback.
+        // Para este ejemplo, voy a implementar una versión que lee el access.log y devuelve el JSON
+        // sin whitelist, y luego en main.rs filtramos o agregamos whitelist.
+        // Pero para mantenerlo simple, voy a leer el access.log y devolver los datos sin filtrar.
+        // Luego en el loop dinámico, al recibir el resultado, se puede filtrar y guardar en DB.
+        // Es más limpio.
 
-# ============================================
-# WHITELIST DE USUARIOS E IPS CONOCIDAS
-# ============================================
-EXPECTED_USERS="root|admin|deploy|ubuntu"
-KNOWN_IPS="79.117.90.148|1.2.3.4"  # Ajusta con tus IPs confiables
+        // Leer access.log y devolver análisis
+        let log_path = "/var/log/nginx/access.log";
+        let window_secs = 5;
+        let limit = 50;
 
-# ============================================
-# 1. IP DEL SERVIDOR
-# ============================================
-SERVER_IP=$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
-[ -z "$SERVER_IP" ] && SERVER_IP="unknown"
-
-# ============================================
-# 2. SESIONES SSH (usuarios autenticados)
-# ============================================
-# Usamos 'w' para sesiones reales y 'ss' para conexiones SSH establecidas
-SSH_RAW=$(w -hs 2>/dev/null | awk '{
-    user=$1; from=$3; login=$4; idle=$5;
-    for(i=6;i<=NF;i++) what=what" "$i;
-    print user "|" from "|" login "|" idle "|" what;
-    what="";
-}')
-SSH_IPS=$(echo "$SSH_RAW" | awk -F'|' '{print $2}' | sort -u)
-# Añadir IPs de conexiones SSH (por si no aparecen en w)
-SSH_CONN_IPS=$(ss -tn state established dport :22 2>/dev/null | awk 'NR>1 {split($5,peer,":"); gsub(/[\[\]]/,"",peer[1]); print peer[1]}' | sort -u)
-ALL_SSH_IPS=$(echo -e "$SSH_IPS\n$SSH_CONN_IPS" | sort -u | grep -v '^$')
-
-# Construir array SSH
-SSH_SESSIONS=""
-for ip in $ALL_SSH_IPS; do
-    # Buscar en 'w' (prioridad)
-    SESSION=$(echo "$SSH_RAW" | grep "|$ip|" | head -1)
-    if [ -n "$SESSION" ]; then
-        USER=$(echo "$SESSION" | cut -d'|' -f1)
-        LOGIN=$(echo "$SESSION" | cut -d'|' -f3)
-        IDLE=$(echo "$SESSION" | cut -d'|' -f4)
-        WHAT=$(echo "$SESSION" | cut -d'|' -f5-)
-    else
-        USER="unknown"
-        LOGIN="N/A"
-        IDLE="N/A"
-        WHAT="ssh-connection"
-    fi
-
-    # Estados
-    if echo "$EXPECTED_USERS" | grep -q "$USER"; then
-        USER_STATUS="EXPECTED"
-    else
-        USER_STATUS="SUSPICIOUS"
-    fi
-
-    if echo "$ip" | grep -qE '^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.'; then
-        IP_STATUS="INTERNAL"
-    elif echo "$KNOWN_IPS" | grep -q "$ip"; then
-        IP_STATUS="KNOWN_EXTERNAL"
-    else
-        IP_STATUS="EXTERNAL"
-    fi
-
-    SUSPICIOUS_CMD=0
-    if echo "$WHAT" | grep -qE 'bash|nc |nohup|python -m|perl -e|ruby -e|sh -i|socat|telnet'; then
-        if [ "$USER" != "root" ] && [ "$USER" != "admin" ]; then
-            SUSPICIOUS_CMD=1
-        fi
-    fi
-
-    # País (solo externas)
-    COUNTRY="XX"
-    if [ "$IP_STATUS" = "EXTERNAL" ] || [ "$IP_STATUS" = "KNOWN_EXTERNAL" ]; then
-        COUNTRY=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-        [ ${#COUNTRY} -ne 2 ] && COUNTRY="XX"
-    fi
-
-    SSH_SESSIONS="${SSH_SESSIONS}${USER}|${ip}|${LOGIN}|${IDLE}|${WHAT}|${USER_STATUS}|${IP_STATUS}|${SUSPICIOUS_CMD}|${COUNTRY}\n"
-done
-
-# ============================================
-# 3. CONEXIONES WEB (puertos 80 y 443)
-# ============================================
-WEB_RAW=$(ss -tn state established 2>/dev/null | awk '
-NR>1 {
-    split($4, local, ":");
-    local_port = local[length(local)];
-    if (local_port != 80 && local_port != 443) next;
-    split($5, peer, ":");
-    remote_ip = peer[1];
-    gsub(/[\[\]]/, "", remote_ip);
-    if (remote_ip ~ /^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2[0-9]|3[01])\.|::1/) next;
-    key = remote_ip "|" local_port;
-    count[key]++;
-}
-END {
-    for (k in count) {
-        split(k, arr, "|");
-        print arr[1] "|" arr[2] "|" count[k];
-    }
-}')
-
-WEB_SESSIONS=""
-for line in $WEB_RAW; do
-    ip=$(echo "$line" | cut -d'|' -f1)
-    port=$(echo "$line" | cut -d'|' -f2)
-    cnt=$(echo "$line" | cut -d'|' -f3)
-    COUNTRY=$(curl -s --max-time 1.5 "http://ip-api.com/csv/$ip?fields=countryCode" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
-    [ ${#COUNTRY} -ne 2 ] && COUNTRY="XX"
-    WEB_SESSIONS="${WEB_SESSIONS}${ip}|${port}|${cnt}|${COUNTRY}\n"
-done
-
-# ============================================
-# 4. GENERAR JSON FINAL
-# ============================================
-escape() {
-    echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\n/\\n/g'
-}
-
-build_json() {
-    echo "{"
-    echo "  \"server_ip\":\"$SERVER_IP\","
-    echo "  \"ssh_sessions\":["
-    first=true
-    if [ -n "$SSH_SESSIONS" ]; then
-        echo "$SSH_SESSIONS" | while IFS='|' read -r user from login idle what user_status ip_status suspicious_cmd country; do
-            [ -z "$user" ] && continue
-            if [ "$first" = true ]; then first=false; else echo ","; fi
-            echo "    {"
-            echo "      \"user\":\"$(escape "$user")\","
-            echo "      \"from\":\"$(escape "$from")\","
-            echo "      \"login\":\"$(escape "$login")\","
-            echo "      \"idle\":\"$(escape "$idle")\","
-            echo "      \"what\":\"$(escape "$what")\","
-            echo "      \"user_status\":\"$(escape "$user_status")\","
-            echo "      \"ip_status\":\"$(escape "$ip_status")\","
-            echo "      \"suspicious_command\":$suspicious_cmd,"
-            echo "      \"country\":\"$(escape "$country")\""
-            echo -n "    }"
-        done
-    fi
-    echo ""
-    echo "  ],"
-    echo "  \"web_connections\":["
-    first=true
-    if [ -n "$WEB_SESSIONS" ]; then
-        echo "$WEB_SESSIONS" | while IFS='|' read -r ip port cnt country; do
-            [ -z "$ip" ] && continue
-            if [ "$first" = true ]; then first=false; else echo ","; fi
-            echo "    {"
-            echo "      \"peer_ip\":\"$(escape "$ip")\","
-            echo "      \"port\":$port,"
-            echo "      \"count\":$cnt,"
-            echo "      \"country\":\"$(escape "$country")\""
-            echo -n "    }"
-        done
-    fi
-    echo ""
-    echo "  ]"
-    echo "}"
-}
-
-build_json
-                "#,
-            ])
-            .output();
-
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                if stdout.trim().is_empty() || stdout.trim() == "{}" {
-                    (
-                        true,
-                        r#"{"server_ip":"unknown","ssh_sessions":[],"web_connections":[]}"#
-                            .to_string(),
-                    )
-                } else {
-                    (true, stdout.to_string())
-                }
-            }
-            Err(e) => (false, format!("Error: {}", e)),
-        }
+        // Usar la función analyze_logs (sin whitelist)
+        let threats = crate::commands::log_analyzer::analyze_logs(log_path, window_secs, limit);
+        (true, json!({ "threats": threats }).to_string())
     } else if action == "set_admin_ip" {
         // Este comando se llama desde el frontend para marcar la IP propia
         if let Some(ip) = payload.get("ip").and_then(|v| v.as_str()) {

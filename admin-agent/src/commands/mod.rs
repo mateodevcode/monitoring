@@ -1,5 +1,6 @@
 pub mod dynamic;
 pub mod fixed;
+pub mod log_analyzer;
 pub mod on_demand;
 
 use serde_json::{json, Value};

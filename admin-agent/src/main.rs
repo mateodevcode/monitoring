@@ -590,6 +590,145 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // En el loop dinámico, descomentar network_threats en DYNAMIC_ACTIONS
+    // O mejor, crear un loop separado con frecuencia de 5 segundos.
+    // Yo recomiendo un loop separado para no bloquear el resto.
+
+    // Dentro de main, después del loop de Docker y antes del loop de Nginx, agregamos:
+
+    // TAREA: Network Threats (cada 5 segundos)
+    let events_channel_id_clone_threats = events_channel_id.clone();
+    let core_rest_url_clone_threats = core_rest_url.clone();
+    let db_conn_clone_threats = db_conn.clone();
+
+    tokio::spawn(async move {
+        info!("🛡️ Iniciando loop de amenazas de red (cada 5s)...");
+        let mut interval_threats = interval(Duration::from_secs(5));
+        let mut last_threats_result: Option<String> = None;
+
+        loop {
+            interval_threats.tick().await;
+
+            // Ejecutar network_threats (acción on_demand)
+            let (success, result) =
+                commands::execute_action("network_threats", &serde_json::Value::Null);
+
+            if !success {
+                error!("❌ Error ejecutando network_threats: {}", result);
+                continue;
+            }
+
+            // Parsear resultado para obtener threats array
+            let parsed = match serde_json::from_str::<serde_json::Value>(&result) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("❌ Error parseando network_threats: {}", e);
+                    continue;
+                }
+            };
+
+            let threats = parsed["threats"].as_array().unwrap_or(&vec![]);
+
+            // Insertar en DB y guardar en ip_stats (solo si hay datos)
+            if !threats.is_empty() {
+                let db = db_conn_clone_threats.lock().await;
+                // Obtener whitelist actual
+                let whitelist = match crate::db::get_whitelist(&db) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        error!("❌ Error obteniendo whitelist: {}", e);
+                        vec![]
+                    }
+                };
+
+                for threat in threats {
+                    let ip = threat["ip"].as_str().unwrap_or("").to_string();
+                    // Saltar si está en whitelist
+                    if whitelist.contains(&ip) {
+                        continue;
+                    }
+
+                    let connections = threat["connections"].as_u64().unwrap_or(0) as i64;
+                    let level = threat["level"].as_str().unwrap_or("SAFE").to_string();
+                    let methods: Vec<String> = threat["methods"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                    let urls: Vec<String> = threat["urls"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+
+                    // Obtener país (usando ip-api.com, o dejamos XX)
+                    let country = get_country_for_ip(&ip)
+                        .await
+                        .unwrap_or_else(|| "XX".to_string());
+
+                    // Guardar en ip_stats
+                    if let Err(e) = crate::db::upsert_ip_stat(
+                        &db,
+                        &ip,
+                        &country,
+                        connections,
+                        "80,443", // puertos por defecto, podríamos extraer de conexiones activas
+                        &level,
+                        &methods,
+                        &urls,
+                    ) {
+                        error!("❌ Error guardando ip_stat para {}: {}", ip, e);
+                    }
+
+                    // Guardar también en network_threats (historial)
+                    let record = crate::db::ThreatRecord {
+                        ip: ip.clone(),
+                        country: country.clone(),
+                        connections: connections as u32,
+                        ports: "80,443".to_string(),
+                        level: level.clone(),
+                        timestamp: chrono::Utc::now(),
+                    };
+                    if let Err(e) = crate::db::insert_threat(&db, &record) {
+                        error!("❌ Error insertando threat para {}: {}", ip, e);
+                    }
+                }
+            }
+
+            // Publicar en WebSocket (si cambió respecto al anterior)
+            let should_publish = match &last_threats_result {
+                Some(prev) => prev != &result,
+                None => true,
+            };
+            last_threats_result = Some(result.clone());
+
+            if !should_publish {
+                continue;
+            }
+
+            // Publicar
+            let payload = json!({
+                "type": "dashboard",
+                "action": "network_threats",
+                "success": true,
+                "output": result,
+                "agent": AGENT_CLIENT_ID
+            });
+
+            if let Err(e) = publish_to_core(
+                &core_rest_url_clone_threats,
+                &events_channel_id_clone_threats,
+                payload,
+            )
+            .await
+            {
+                error!("❌ Error publicando network_threats: {}", e);
+            }
+        }
+    });
+
     // ==========================================
     // 7. EJECUTAR SERVICIO HTTP
     // ==========================================
@@ -738,4 +877,21 @@ async fn process_manual_payload(
         warn!("️ Payload no contiene 'action' ni 'cmd'");
     }
     Ok(())
+}
+
+// Función auxiliar para obtener país
+async fn get_country_for_ip(ip: &str) -> Option<String> {
+    let url = format!("http://ip-api.com/csv/{}?fields=countryCode", ip);
+    match reqwest::get(&url).await {
+        Ok(resp) => {
+            if let Ok(text) = resp.text().await {
+                let country = text.trim().to_uppercase();
+                if country.len() == 2 {
+                    return Some(country);
+                }
+            }
+            None
+        }
+        Err(_) => None,
+    }
 }

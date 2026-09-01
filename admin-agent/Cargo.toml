@@ -20,11 +20,13 @@ futures-util = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
 
 # ==========================================
-# Serialización y Fechas
+# Serialización, Fechas y Regex
 # ==========================================
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+regex = "1.10"          # <-- NUEVO: Para parsear logs
+lazy_static = "1.4"     # <-- NUEVO: Para definir regex estáticos
 
 # ==========================================
 # Seguridad y Autenticación
@@ -36,7 +38,6 @@ totp-rs = { version = "5", features = ["gen_secret", "qr"] }
 # ==========================================
 # Cliente HTTP y WebSockets
 # ==========================================
-# ⚠️ CAMBIO AQUÍ: Se agregó "blocking" a las features
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 ureq = "2.9"
 tokio-tungstenite = "0.23"
