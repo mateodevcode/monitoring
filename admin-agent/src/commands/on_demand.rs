@@ -301,7 +301,7 @@ check redis-server Redis databases
     } else if action == "network_threats" {
         // Usar log_analyzer para analizar access.log
         let log_path = "/var/log/nginx/access.log";
-        let window_secs = 5;
+        let window_secs = 2;
         let limit = 50;
 
         // Obtener whitelist actual (se pasará desde el llamador, pero aquí no tenemos acceso a la DB)
