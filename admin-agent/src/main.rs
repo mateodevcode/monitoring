@@ -294,7 +294,7 @@ async fn get_country_cached(ip: &str, cache: &GeoCache) -> String {
         let mut cache_guard = cache.lock().await;
         cache_guard.insert(
             ip.to_string(),
-            (country.clone(), Utc::now() + Duration::hours(1)),
+            (country.clone(), Utc::now() + ChronoDuration::hours(1)),
         );
     }
     country
