@@ -42,9 +42,11 @@ services:
       - ./admin-agent-data:/app/data
       - /proc:/proc:ro
       - /sys:/sys:ro
-        # --- AGREGAR ESTAS DOS LÍNEAS ---
       - /var/run/utmp:/var/run/utmp:ro
       - /var/log/wtmp:/var/log/wtmp:ro
+      - /var/log/nginx:/var/log/nginx:ro # 👈 PARA LEER ACCESS.LOG
+      - /etc/nginx:/etc/nginx:ro # 👈 PARA NGINX_FULL (sitios, certs)
+      - /etc/letsencrypt:/etc/letsencrypt:ro # 👈 PARA CERTIFICADOS
     cap_add:
       - SYS_ADMIN
       - SYS_PTRACE
