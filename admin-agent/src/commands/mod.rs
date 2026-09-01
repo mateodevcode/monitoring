@@ -66,4 +66,5 @@ pub const DYNAMIC_ACTIONS: &[&str] = &[
     "disk_space",
     "uptime_check",
     "get_active_connections",
+    "network_threats",
 ];
