@@ -23,7 +23,7 @@ impl AiConfig {
         Self {
             provider: env::var("AI_PROVIDER").unwrap_or_else(|_| "gemini".to_string()),
             api_key: env::var("AI_API_KEY").unwrap_or_else(|_| String::new()),
-            model: env::var("AI_MODEL").unwrap_or_else(|_| "gemini-1.5-flash".to_string()),
+            model: env::var("AI_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string()),
         }
     }
 }
