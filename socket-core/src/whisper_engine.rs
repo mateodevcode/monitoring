@@ -23,9 +23,9 @@ impl WhisperEngine {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
         params.set_translate(false);
-        // whisper-rs 0.13 espera Option<&str>
         params.set_language(Some(lang));
         params.set_n_threads(4);
+        params.set_flash_attn(true); // 🆕 Flash attention: ~2x más rápido en CPU
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
