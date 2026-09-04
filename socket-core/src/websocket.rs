@@ -46,7 +46,7 @@ pub async fn websocket_handler(
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Handshake: recibir channel y client_id
+    // Handshake
     let (channel_id, client_id) = match receiver.next().await {
         Some(Ok(msg)) => {
             if let Ok(text) = msg.to_text() {
@@ -99,7 +99,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("WebSocket client {} connected to {}", client_id, channel_id);
     let mut rx = tx.subscribe();
 
-    // Emitir evento de client_joined
+    // Emitir client_joined
     if let Some(clients) = state.channel_manager.get_clients(&channel_id) {
         let clients_list: Vec<String> = clients.iter().map(|c| c.id.clone()).collect();
         let join_event = Event::new(
@@ -116,15 +116,31 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         let _ = tx.send(join_event);
     }
 
-    // Estado para manejar sesiones de transcripción
     let mut current_lang: Option<String> = None;
-
-    // ... (código anterior sin cambios hasta el loop)
 
     loop {
         tokio::select! {
             result = rx.recv() => {
-                // ... (igual)
+                match result {
+                    Ok(event) => {
+                        info!("📥 Evento recibido en rx: {:?}", event);
+                        let should_receive = event.targets.contains(&"*".to_string()) || event.targets.contains(&client_id);
+                        if should_receive {
+                            if let Ok(json_str) = serde_json::to_string(&event) {
+                                if let Err(e) = sender.send(Message::Text(json_str)).await {
+                                    error!("Failed to send to client: {}", e);
+                                    break;
+                                }
+                            }
+                        } else {
+                            debug!("Event for {:?} received but not for client {}", event.targets, client_id);
+                        }
+                    }
+                    Err(_) => {
+                        debug!("Channel broadcast closed");
+                        break;
+                    }
+                }
             }
             msg = receiver.next() => {
                 match msg {
@@ -141,7 +157,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 )).await;
                                             }
                                         }
-                                        // ⚠️ Se elimina el caso "audio_data" porque ahora se recibe como binario
                                         _ => {
                                             debug!("Unknown action: {}", action);
                                         }
@@ -153,7 +168,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             }
                         }
                     }
-                    // 🆕 Manejo de mensajes binarios (audio)
                     Some(Ok(Message::Binary(data))) => {
                         if let Some(lang) = &current_lang {
                             // Enviar "procesando" inmediatamente
@@ -169,13 +183,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let tx_clone = tx.clone();
                             let channel_id_clone = channel_id.clone();
                             let client_id_clone = client_id.clone();
-                            // Los bytes ya están en data (Vec<u8>), los pasamos directamente
                             let audio_bytes = data.clone();
 
                             tokio::task::spawn_blocking(move || {
                                 let t0 = std::time::Instant::now();
 
-                                // Llamada a la función modificada (acepta &[u8])
                                 match audio_processor::webm_to_f32_samples(&audio_bytes) {
                                     Ok(samples) => {
                                         info!("⏱️ ffmpeg+wav: {:?}", t0.elapsed());
@@ -194,12 +206,26 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         match whisper_engine.transcribe(&samples, &lang_clone) {
                                             Ok(text) => {
                                                 info!("⏱️ TOTAL: {:?} | \"{}\"", t0.elapsed(), text);
-                                                let _ = tx_clone.send(Event::new(
+
+                                                // 🔥 CREAR EVENTO CON TARGET EXPLÍCITO
+                                                let event = Event::new(
                                                     channel_id_clone,
-                                                    client_id_clone,
-                                                    vec!["*".to_string()],
+                                                    client_id_clone.clone(),
+                                                    vec!["*".to_string(), client_id_clone.clone()],
                                                     json!({ "type": "transcription", "text": text, "duration_secs": duration }),
-                                                ));
+                                                );
+
+                                                // 📡 LOG ANTES DE ENVIAR
+                                                info!("📤 Enviando evento de transcripción a cliente {}: {:?}", client_id_clone, event);
+
+                                                match tx_clone.send(event) {
+                                                    Ok(_) => {
+                                                        info!("✅ Evento enviado exitosamente");
+                                                    }
+                                                    Err(e) => {
+                                                        error!("❌ Error al enviar evento: {}", e);
+                                                    }
+                                                }
                                             }
                                             Err(e) => {
                                                 error!("Whisper failed: {}", e);
@@ -222,7 +248,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 }
                             });
                         } else {
-                            // Si llegó audio sin un idioma configurado, lo ignoramos o notificamos
                             let _ = sender.send(Message::Text(
                                 json!({"type": "error", "message": "Debes enviar 'transcribe' primero"}).to_string()
                             )).await;
