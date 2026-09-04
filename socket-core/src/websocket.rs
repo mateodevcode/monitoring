@@ -110,10 +110,60 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&text) {
                             if let Some(action) = obj.get("action").and_then(|v| v.as_str()) {
-                                if action == "transcribe" {
-                                    if let Some(lang) = obj.get("lang").and_then(|v| v.as_str()) {
-                                        current_lang = Some(lang.to_string());
-                                        let _ = sender.send(Message::Text(json!({"type": "ready"}).to_string())).await;
+                                match action {
+                                    "transcribe" => {
+                                        if let Some(lang) = obj.get("lang").and_then(|v| v.as_str()) {
+                                            current_lang = Some(lang.to_string());
+                                            let _ = sender.send(Message::Text(json!({"type": "ready"}).to_string())).await;
+                                        }
+                                    }
+                                    "chat_text" => {
+                                        let user_text = obj.get("text").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                                        if let Some(text_owned) = user_text {
+                                            // Avisamos que empezamos a procesar (mismo evento "status" que usa el flujo de audio)
+                                            let _ = tx.send(Event::new(
+                                                channel_id.clone(),
+                                                "__system__".to_string(),
+                                                vec![client_id.clone()],
+                                                json!({ "type": "status", "message": "💬 Procesando mensaje..." }),
+                                            ));
+
+                                            let heart_agent = Arc::clone(&state.heart_agent);
+                                            let tx_ai = tx.clone();
+                                            let cid_clone = channel_id.clone();
+                                            let client_for_error = client_id.clone();
+
+                                            tokio::spawn(async move {
+                                                match heart_agent.ask(&text_owned).await {
+                                                    Ok(ai_response) => {
+                                                        info!("🤖 JARVIS responde (texto): {}", ai_response);
+                                                        let _ = tx_ai.send(Event::new(
+                                                            cid_clone,
+                                                            "heart_agent".to_string(),
+                                                            vec!["*".to_string()],
+                                                            json!({ "type": "ai_response", "text": ai_response, "original_text": text_owned }),
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Heart Agent falló (texto): {}", e);
+                                                        let _ = tx_ai.send(Event::new(
+                                                            cid_clone,
+                                                            "__system__".to_string(),
+                                                            vec![client_for_error],
+                                                            json!({ "type": "error", "message": format!("IA no disponible: {}", e) }),
+                                                        ));
+                                                    }
+                                                }
+                                            });
+                                        } else {
+                                            let _ = sender.send(Message::Text(
+                                                json!({"type": "error", "message": "Falta el campo 'text'"}).to_string()
+                                            )).await;
+                                        }
+                                    }
+                                    _ => {
+                                        debug!("Acción desconocida: {}", action);
                                     }
                                 }
                             }
