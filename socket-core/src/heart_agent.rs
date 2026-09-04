@@ -61,6 +61,12 @@ impl AiProvider for GeminiProvider {
             .await?
             .json::<serde_json::Value>()
             .await?;
+
+        // 👇 AÑADIR ESTO para depurar
+        if response.get("candidates").is_none() {
+            tracing::error!("❌ Respuesta inesperada de Gemini: {}", response);
+        }
+
         Ok(response["candidates"][0]["content"]["parts"][0]["text"]
             .as_str()
             .unwrap_or("No pude procesar eso, jefe.")
