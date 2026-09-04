@@ -46,8 +46,8 @@ RUN mkdir -p /app/models
 
 # Descargar modelo Whisper small (~466MB, rápido en CPU)
 RUN curl -L \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" \
-    -o /app/models/ggml-base.bin
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" \
+    -o /app/models/ggml-small.bin
 
 # Copiar binario compilado
 COPY --from=builder /app/target/release/socket-core /app/socket-core
