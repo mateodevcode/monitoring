@@ -15,12 +15,6 @@ services:
       - .env
     networks:
       - central_network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3005/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
 
   # EL AGENTE - control total del host, por eso va detrás de Tailscale + JWT + OTP
   admin-agent:
