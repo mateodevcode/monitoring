@@ -24,6 +24,7 @@ enum ClientAction {
 
 #[derive(Serialize)]
 #[serde(tag = "type")]
+#[allow(dead_code)]
 enum ServerResponse {
     #[serde(rename = "ready")]
     Ready,
@@ -152,7 +153,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     let _ = sender.send(Message::Text(json_str)).await;
                                 }
                             }
-                            Ok(ClientAction::AudioData { data, format: _ }) => {
+                            Ok(ClientAction::AudioData { data, .. }) => {
                             if let Some(lang) = &current_lang {
                                 // Mover clones al spawn
                                 let whisper_engine = Arc::clone(&state.whisper_engine);
