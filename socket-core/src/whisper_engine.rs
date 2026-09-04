@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 pub struct WhisperEngine {
     ctx: Arc<WhisperContext>,
@@ -8,8 +8,13 @@ pub struct WhisperEngine {
 impl WhisperEngine {
     pub fn new(model_path: &str) -> Result<Self, String> {
         tracing::info!("Loading whisper model: {}", model_path);
-        let ctx =
-            WhisperContext::new(model_path).map_err(|e| format!("Failed to load model: {}", e))?;
+
+        // whisper-rs 0.13 requiere WhisperContextParameters
+        let ctx_params = WhisperContextParameters::default();
+
+        let ctx = WhisperContext::new_with_params(model_path, ctx_params)
+            .map_err(|e| format!("Failed to load model: {}", e))?;
+
         tracing::info!("✅ Whisper model loaded successfully");
         Ok(Self { ctx: Arc::new(ctx) })
     }
@@ -18,7 +23,8 @@ impl WhisperEngine {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
         params.set_translate(false);
-        params.set_language(lang);
+        // whisper-rs 0.13 espera Option<&str>
+        params.set_language(Some(lang));
         params.set_n_threads(4);
         params.set_print_special(false);
         params.set_print_progress(false);
