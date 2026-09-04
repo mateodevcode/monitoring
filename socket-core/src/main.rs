@@ -31,10 +31,9 @@ async fn main() {
 
     // Inicializar el motor de Whisper UNA vez al arrancar
     // El modelo se descarga automáticamente en el Dockerfile
-    // Inicializar el motor de Whisper UNA vez al arrancar
-    // Modelo configurable por variable de entorno (default: small)
+    // Modelo configurable por variable de entorno (default: base - más rápido)
     let model_path = std::env::var("WHISPER_MODEL_PATH")
-        .unwrap_or_else(|_| "/app/models/ggml-small.bin".to_string());
+        .unwrap_or_else(|_| "/app/models/ggml-base.bin".to_string());
 
     let whisper_engine = match WhisperEngine::new(&model_path) {
         Ok(engine) => {

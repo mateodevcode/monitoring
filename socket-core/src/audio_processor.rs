@@ -1,25 +1,21 @@
-use base64::{engine::general_purpose, Engine as _};
-use std::io::Write;
+use std::fs;
 use std::process::Command;
 
-pub fn webm_to_f32_samples(audio_base64: &str) -> Result<Vec<f32>, String> {
-    // Decodificar base64
-    let audio_data = general_purpose::STANDARD
-        .decode(audio_base64)
-        .map_err(|e| format!("Base64 decode failed: {}", e))?;
-
+pub fn webm_to_f32_samples(audio_bytes: &[u8]) -> Result<Vec<f32>, String> {
     // Crear directorio temporal
     let tmp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let input_path = tmp_dir.path().join("input.webm");
     let output_path = tmp_dir.path().join("output.wav");
 
-    // Escribir audio a archivo temporal
-    let mut file = std::fs::File::create(&input_path).map_err(|e| e.to_string())?;
-    file.write_all(&audio_data).map_err(|e| e.to_string())?;
+    // Escribir los bytes directamente (sin decodificación Base64)
+    fs::write(&input_path, audio_bytes)
+        .map_err(|e| format!("Failed to write input file: {}", e))?;
 
     // Convertir webm → WAV 16kHz mono con ffmpeg
     let output = Command::new("ffmpeg")
         .args([
+            "-threads",
+            "1",
             "-i",
             input_path.to_str().unwrap(),
             "-ar",
