@@ -121,128 +121,137 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     loop {
         tokio::select! {
-            result = rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        let should_receive = event.targets.contains(&"*".to_string()) || event.targets.contains(&client_id);
-                        if should_receive {
-                            if let Ok(json_str) = serde_json::to_string(&event) {
-                                if let Err(e) = sender.send(Message::Text(json_str)).await {
-                                    error!("Failed to send to client: {}", e);
-                                    break;
-                                }
-                            }
-                        } else {
-                            debug!("Event for {:?} received but not for client {}", event.targets, client_id);
-                        }
-                    }
-                    Err(_) => {
-                        debug!("Channel broadcast closed");
-                        break;
-                    }
-                }
-            }
-            msg = receiver.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<ClientAction>(&text) {
-                            Ok(ClientAction::Transcribe { lang }) => {
-                                current_lang = Some(lang);
-                                let response = ServerResponse::Ready;
-                                if let Ok(json_str) = serde_json::to_string(&response) {
-                                    let _ = sender.send(Message::Text(json_str)).await;
-                                }
-                            }
-                            Ok(ClientAction::AudioData { data, .. }) => {
-                            if let Some(lang) = &current_lang {
-                                // Mover clones al spawn
-                                let whisper_engine = Arc::clone(&state.whisper_engine);
-                                let lang_clone = lang.clone();
-                                let tx_clone = tx.clone();
-                                let channel_id_clone = channel_id.clone();
-                                let client_id_clone = client_id.clone();
-
-                                tokio::spawn(async move {
-                                    // 1. Convertir audio webm → samples f32
-                                    match audio_processor::webm_to_f32_samples(&data) {
-                                        Ok(samples) => {
-                                            if samples.is_empty() {
-                                                tracing::warn!("No audio detected in sample");
-                                                return;
-                                            }
-
-                                            let duration = samples.len() as f32 / 16000.0;
-
-                                            // 2. Transcribir con whisper
-                                            match whisper_engine.transcribe(&samples, &lang_clone) {
-                                                Ok(text) => {
-                                                    info!("Transcription: \"{}\"", text);
-
-                                                    // 3. Emitir Event al canal
-                                                    //    El cliente lo recibe vía broadcast (está suscrito)
-                                                    //    El admin-agent lo recibe también (auditoría)
-                                                    let event = Event::new(
-                                                        channel_id_clone,
-                                                        client_id_clone,
-                                                        vec!["*".to_string()],
-                                                        json!({
-                                                            "type": "transcription",
-                                                            "text": text,
-                                                            "duration_secs": duration,
-                                                        }),
-                                                    );
-                                                    let _ = tx_clone.send(event);
-                                                }
-                                                Err(e) => {
-                                                    error!("Whisper transcription failed: {}", e);
-                                                    // Enviar error al canal para que el cliente lo sepa
-                                                    let error_event = Event::new(
-                                                        channel_id_clone,
-                                                        "__system__".to_string(),
-                                                        vec![client_id_clone], // Solo al cliente original
-                                                        json!({
-                                                            "type": "error",
-                                                            "message": format!("Transcription failed: {}", e),
-                                                        }),
-                                                    );
-                                                    let _ = tx_clone.send(error_event);
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Audio processing failed: {}", e);
-                                            let error_event = Event::new(
-                                                channel_id_clone,
-                                                "__system__".to_string(),
-                                                vec![client_id_clone],
-                                                json!({
-                                                    "type": "error",
-                                                    "message": format!("Audio processing failed: {}", e),
-                                                }),
-                                            );
-                                            let _ = tx_clone.send(error_event);
+                    result = rx.recv() => {
+                        match result {
+                            Ok(event) => {
+                                let should_receive = event.targets.contains(&"*".to_string()) || event.targets.contains(&client_id);
+                                if should_receive {
+                                    if let Ok(json_str) = serde_json::to_string(&event) {
+                                        if let Err(e) = sender.send(Message::Text(json_str)).await {
+                                            error!("Failed to send to client: {}", e);
+                                            break;
                                         }
                                     }
-                                });
+                                } else {
+                                    debug!("Event for {:?} received but not for client {}", event.targets, client_id);
+                                }
+                            }
+                            Err(_) => {
+                                debug!("Channel broadcast closed");
+                                break;
                             }
                         }
-                            Err(e) => {
-                                debug!("Failed to parse client message: {}", e);
+                    }
+                    msg = receiver.next() => {
+            match msg {
+                Some(Ok(Message::Text(text))) => {
+                    match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(obj) => {
+                            if let Some(action) = obj.get("action").and_then(|v| v.as_str()) {
+                                match action {
+                                    "transcribe" => {
+                                        if let Some(lang) = obj.get("lang").and_then(|v| v.as_str()) {
+                                            current_lang = Some(lang.to_string());
+                                            let _ = sender.send(Message::Text(
+                                                json!({"type": "ready"}).to_string()
+                                            )).await;
+                                        }
+                                    }
+                                    "audio_data" => {
+                                        if let (Some(data), Some(lang)) = (
+                                            obj.get("data").and_then(|v| v.as_str()),
+                                            &current_lang
+                                        ) {
+                                            // 📡 Enviar "procesando" INMEDIATAMENTE
+                                            // Esto mantiene la conexión viva y da feedback al usuario
+                                            let _ = tx.send(Event::new(
+                                                channel_id.clone(),
+                                                "__system__".to_string(),
+                                                vec![client_id.clone()],
+                                                json!({ "type": "status", "message": "🎧 Audio recibido, procesando..." }),
+                                            ));
+
+                                            let whisper_engine = Arc::clone(&state.whisper_engine);
+                                            let lang_clone = lang.clone();
+                                            let tx_clone = tx.clone();
+                                            let channel_id_clone = channel_id.clone();
+                                            let client_id_clone = client_id.clone();
+                                            let data_owned = data.to_string();
+
+                                            // 🧵 spawn_blocking: trabajo CPU-intensivo fuera del runtime async
+                                            tokio::task::spawn_blocking(move || {
+                                                let t0 = std::time::Instant::now();
+
+                                                match audio_processor::webm_to_f32_samples(&data_owned) {
+                                                    Ok(samples) => {
+                                                        info!("⏱️ ffmpeg+wav: {:?}", t0.elapsed());
+
+                                                        if samples.is_empty() {
+                                                            let _ = tx_clone.send(Event::new(
+                                                                channel_id_clone, "__system__".to_string(),
+                                                                vec![client_id_clone],
+                                                                json!({ "type": "error", "message": "No se detectó audio" }),
+                                                            ));
+                                                            return;
+                                                        }
+
+                                                        let duration = samples.len() as f32 / 16000.0;
+
+                                                        match whisper_engine.transcribe(&samples, &lang_clone) {
+                                                            Ok(text) => {
+                                                                info!("⏱️ TOTAL: {:?} | \"{}\"", t0.elapsed(), text);
+                                                                let _ = tx_clone.send(Event::new(
+                                                                    channel_id_clone,
+                                                                    client_id_clone,
+                                                                    vec!["*".to_string()],
+                                                                    json!({ "type": "transcription", "text": text, "duration_secs": duration }),
+                                                                ));
+                                                            }
+                                                            Err(e) => {
+                                                                error!("Whisper failed: {}", e);
+                                                                let _ = tx_clone.send(Event::new(
+                                                                    channel_id_clone, "__system__".to_string(),
+                                                                    vec![client_id_clone],
+                                                                    json!({ "type": "error", "message": e }),
+                                                                ));
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Audio processing failed: {}", e);
+                                                        let _ = tx_clone.send(Event::new(
+                                                            channel_id_clone, "__system__".to_string(),
+                                                            vec![client_id_clone],
+                                                            json!({ "type": "error", "message": e }),
+                                                        ));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                    _ => {
+                                        debug!("Unknown action: {}", action);
+                                    }
+                                }
                             }
                         }
+                        Err(e) => {
+                            debug!("Failed to parse client message: {}", e);
+                        }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
-                        info!("Client {} disconnected", client_id);
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        error!("WebSocket error: {}", e);
-                        break;
-                    }
-                    _ => {}
                 }
+                Some(Ok(Message::Close(_))) | None => {
+                    info!("Client {} disconnected", client_id);
+                    break;
+                }
+                Some(Err(e)) => {
+                    error!("WebSocket error: {}", e);
+                    break;
+                }
+                _ => {}
             }
         }
+                }
     }
 
     state.channel_manager.unsubscribe(&channel_id, &client_id);
