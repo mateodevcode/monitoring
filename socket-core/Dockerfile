@@ -5,13 +5,14 @@ FROM rust:1-bookworm AS builder
 
 WORKDIR /app
 
-# Instalar dependencias de compilación
+# Instalar TODAS las dependencias de compilación
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
     clang \
     libclang-dev \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar manifests para cache de dependencias
