@@ -1,16 +1,55 @@
-FROM rust:1-alpine AS builder
+# ============================================
+# BUILDER - Compila Rust + whisper.cpp
+# ============================================
+FROM rust:1-bookworm AS builder
+
 WORKDIR /app
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev
+
+# Instalar dependencias de compilación
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar manifests para cache de dependencias
 COPY Cargo.toml Cargo.lock* ./
+
+# Crear dummy main para compilar dependencias (cache layer)
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release
+
+# Limpiar dummy y copiar código real
 RUN rm -rf src
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates curl
-WORKDIR /root/
-COPY --from=builder /app/target/release/socket-core .
+# ============================================
+# RUNTIME - Contenedor final
+# ============================================
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Instalar runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Crear directorio para modelos
+RUN mkdir -p /app/models
+
+# Descargar modelo Whisper medium (~1.5GB)
+# Esto se cachea en la imagen de Docker
+RUN curl -L \
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin" \
+    -o /app/models/ggml-medium.bin
+
+# Copiar binario compilado
+COPY --from=builder /app/target/release/socket-core /app/socket-core
+
 EXPOSE 3005
+
 CMD ["./socket-core"]

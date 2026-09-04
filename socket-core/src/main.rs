@@ -1,7 +1,9 @@
+mod audio_processor;
 mod channel_manager;
 mod handlers;
 mod models;
 mod websocket;
+mod whisper_engine;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -13,8 +15,10 @@ use handlers::{
     AppState,
 };
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::info;
+use whisper_engine::WhisperEngine;
 
 #[tokio::main]
 async fn main() {
@@ -25,8 +29,24 @@ async fn main() {
         )
         .init();
 
+    // Inicializar el motor de Whisper UNA vez al arrancar
+    // El modelo se descarga automáticamente en el Dockerfile
+    let whisper_engine = match WhisperEngine::new("/app/models/ggml-medium.bin") {
+        Ok(engine) => {
+            info!("✅ Whisper engine initialized with medium model");
+            Arc::new(engine)
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to initialize Whisper engine: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     let channel_manager = channel_manager::ChannelManager::new();
-    let state = AppState { channel_manager };
+    let state = AppState {
+        channel_manager,
+        whisper_engine,
+    };
 
     let app = Router::new()
         .route("/health", get(health))

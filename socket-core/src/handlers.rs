@@ -1,5 +1,6 @@
 use crate::channel_manager::ChannelManager;
 use crate::models::*;
+use crate::whisper_engine::WhisperEngine;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -7,10 +8,12 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
     pub channel_manager: ChannelManager,
+    pub whisper_engine: Arc<WhisperEngine>,
 }
 
 pub async fn health() -> impl IntoResponse {
