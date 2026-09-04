@@ -11,6 +11,8 @@ services:
     # Si el frontend necesita WS, Nginx hace proxy hacia este nombre de servicio.
     environment:
       - RUST_LOG=info
+    env_file:
+      - .env
     networks:
       - central_network
     healthcheck:

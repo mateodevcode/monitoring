@@ -1,4 +1,5 @@
 use crate::channel_manager::ChannelManager;
+use crate::heart_agent::AiProvider; // 🆕 Línea agregada para el trait de la IA
 use crate::models::*;
 use crate::whisper_engine::WhisperEngine;
 use axum::{
@@ -14,6 +15,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub channel_manager: ChannelManager,
     pub whisper_engine: Arc<WhisperEngine>,
+    pub heart_agent: Arc<dyn AiProvider>, //  Línea agregada para el agente
 }
 
 pub async fn health() -> impl IntoResponse {

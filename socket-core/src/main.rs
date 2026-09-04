@@ -1,7 +1,9 @@
 mod audio_processor;
 mod channel_manager;
 mod handlers;
+mod heart_agent;
 mod models;
+mod prompts;
 mod websocket;
 mod whisper_engine;
 
@@ -14,14 +16,17 @@ use handlers::{
     create_channel, emit_event, get_channel, get_channel_clients, health, list_channels, stats,
     AppState,
 };
+use heart_agent::{create_provider, AiConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use whisper_engine::WhisperEngine;
 
 #[tokio::main]
 async fn main() {
+    // 1. Cargar variables de entorno desde .env (si existe)
+    let _ = dotenv::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -29,26 +34,32 @@ async fn main() {
         )
         .init();
 
-    // Inicializar el motor de Whisper UNA vez al arrancar
-    // El modelo se descarga automáticamente en el Dockerfile
+    // 2. Inicializar Whisper
     let model_path = std::env::var("WHISPER_MODEL_PATH")
         .unwrap_or_else(|_| "/app/models/ggml-small.bin".to_string());
 
-    let whisper_engine = match WhisperEngine::new(&model_path) {
+    let whisper_engine = match whisper_engine::WhisperEngine::new(&model_path) {
         Ok(engine) => {
-            info!("✅ Whisper engine initialized with model: {}", model_path);
+            info!("✅ Whisper engine initialized: {}", model_path);
             Arc::new(engine)
         }
         Err(e) => {
-            tracing::error!("❌ Failed to initialize Whisper engine: {}", e);
+            tracing::error!("❌ Failed to initialize Whisper: {}", e);
             std::process::exit(1);
         }
     };
 
+    // 3. Inicializar Heart Agent (IA)
+    let ai_config = AiConfig::from_env();
+    let heart_agent = create_provider(&ai_config);
+    info!("🤖 AI Provider configured: {}", ai_config.provider);
+
+    // 4. Crear el estado compartido
     let channel_manager = channel_manager::ChannelManager::new();
     let state = AppState {
         channel_manager,
         whisper_engine,
+        heart_agent,
     };
 
     let app = Router::new()
