@@ -9,7 +9,6 @@ impl WhisperEngine {
     pub fn new(model_path: &str) -> Result<Self, String> {
         tracing::info!("Loading whisper model: {}", model_path);
 
-        // whisper-rs 0.13 requiere WhisperContextParameters
         let ctx_params = WhisperContextParameters::default();
 
         let ctx = WhisperContext::new_with_params(model_path, ctx_params)
@@ -25,7 +24,6 @@ impl WhisperEngine {
         params.set_translate(false);
         params.set_language(Some(lang));
         params.set_n_threads(4);
-        params.set_flash_attn(true); // 🆕 Flash attention: ~2x más rápido en CPU
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
