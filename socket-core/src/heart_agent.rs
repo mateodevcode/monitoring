@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde_json::json;
 use std::env;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::error;
 
 #[async_trait]
 pub trait AiProvider: Send + Sync {
@@ -110,7 +110,6 @@ impl AiProvider for OpenAiProvider {
     }
 }
 
-// DeepSeek es 100% compatible con la API de OpenAI, solo cambia la URL
 pub struct DeepSeekProvider {
     client: Client,
     api_key: String,

@@ -2,7 +2,6 @@ use std::fs;
 use tracing::info;
 
 pub fn load_system_prompt() -> String {
-    // Intenta leer desde el archivo, si no existe, usa un fallback seguro
     match fs::read_to_string("system_prompt.txt") {
         Ok(prompt) => {
             info!("✅ System prompt loaded from file");

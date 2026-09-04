@@ -21,7 +21,6 @@ pub async fn websocket_handler(
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
-    // 1. Handshake: recibir channel y client_id
     let (channel_id, client_id) = match receiver.next().await {
         Some(Ok(msg)) => {
             if let Ok(text) = msg.to_text() {
@@ -56,7 +55,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         _ => return,
     };
 
-    // 2. Suscribirse al canal
     let tx =
         match state
             .channel_manager
@@ -74,29 +72,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("WebSocket client {} connected to {}", client_id, channel_id);
     let mut rx = tx.subscribe();
 
-    // 3. Emitir evento de client_joined
     if let Some(clients) = state.channel_manager.get_clients(&channel_id) {
         let clients_list: Vec<String> = clients.iter().map(|c| c.id.clone()).collect();
         let join_event = Event::new(
             channel_id.clone(),
             "__system__".to_string(),
             vec!["*".to_string()],
-            json!({
-                "type": "client_joined",
-                "client_id": client_id.clone(),
-                "clients": clients_list,
-                "total_clients": clients.len()
-            }),
+            json!({ "type": "client_joined", "client_id": client_id, "clients": clients_list, "total_clients": clients.len() }),
         );
         let _ = tx.send(join_event);
     }
 
     let mut current_lang: Option<String> = None;
 
-    // 4. Loop principal de eventos
     loop {
         tokio::select! {
-            // Rama A: Recibir eventos del canal (broadcast)
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
@@ -112,30 +102,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             debug!("Event for {:?} received but not for client {}", event.targets, client_id);
                         }
                     }
-                    Err(_) => {
-                        debug!("Channel broadcast closed");
-                        break;
-                    }
+                    Err(_) => { debug!("Channel broadcast closed"); break; }
                 }
             }
-
-            // Rama B: Recibir mensajes del cliente
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&text) {
                             if let Some(action) = obj.get("action").and_then(|v| v.as_str()) {
-                                match action {
-                                    "transcribe" => {
-                                        if let Some(lang) = obj.get("lang").and_then(|v| v.as_str()) {
-                                            current_lang = Some(lang.to_string());
-                                            let _ = sender.send(Message::Text(
-                                                json!({"type": "ready"}).to_string()
-                                            )).await;
-                                        }
-                                    }
-                                    _ => {
-                                        debug!("Unknown action: {}", action);
+                                if action == "transcribe" {
+                                    if let Some(lang) = obj.get("lang").and_then(|v| v.as_str()) {
+                                        current_lang = Some(lang.to_string());
+                                        let _ = sender.send(Message::Text(json!({"type": "ready"}).to_string())).await;
                                     }
                                 }
                             }
@@ -143,15 +121,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     Some(Ok(Message::Binary(data))) => {
                         if let Some(lang) = &current_lang {
-                            // Enviar aviso de estado inmediatamente (mantiene la conexión viva)
                             let _ = tx.send(Event::new(
-                                channel_id.clone(),
-                                "__system__".to_string(),
-                                vec![client_id.clone()],
+                                channel_id.clone(), "__system__".to_string(), vec![client_id.clone()],
                                 json!({ "type": "status", "message": "🎧 Audio recibido, procesando..." }),
                             ));
 
-                            // Clonar lo necesario para el thread blocking
                             let whisper_engine = Arc::clone(&state.whisper_engine);
                             let heart_agent = Arc::clone(&state.heart_agent);
                             let lang_clone = lang.clone();
@@ -160,38 +134,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             let client_id_clone = client_id.clone();
                             let audio_bytes = data.clone();
 
-                            // Procesamiento pesado de CPU (no bloquea el runtime async)
                             tokio::task::spawn_blocking(move || {
                                 let t0 = std::time::Instant::now();
-
                                 match audio_processor::webm_to_f32_samples(&audio_bytes) {
                                     Ok(samples) => {
                                         info!("⏱️ ffmpeg+wav: {:?}", t0.elapsed());
-
                                         if samples.is_empty() {
-                                            let _ = tx_clone.send(Event::new(
-                                                channel_id_clone.clone(), "__system__".to_string(),
-                                                vec![client_id_clone.clone()],
-                                                json!({ "type": "error", "message": "No se detectó audio" }),
-                                            ));
+                                            let _ = tx_clone.send(Event::new(channel_id_clone.clone(), "__system__".to_string(), vec![client_id_clone.clone()], json!({ "type": "error", "message": "No se detectó audio" })));
                                             return;
                                         }
-
                                         let duration = samples.len() as f32 / 16000.0;
-
                                         match whisper_engine.transcribe(&samples, &lang_clone) {
                                             Ok(text) => {
                                                 info!("⏱️ TOTAL: {:?} | Transcripción: \"{}\"", t0.elapsed(), text);
 
-                                                // 1. Enviar evento de transcripción cruda (para que el UI la muestre)
+                                                // 1. Enviar transcripción cruda
                                                 let _ = tx_clone.send(Event::new(
-                                                    channel_id_clone.clone(),
-                                                    client_id_clone.clone(),
+                                                    channel_id_clone.clone(), client_id_clone.clone(),
                                                     vec!["*".to_string(), client_id_clone.clone()],
                                                     json!({ "type": "transcription", "text": text.clone(), "duration_secs": duration }),
                                                 ));
 
-                                                // 2. Delegar al Heart Agent de forma asíncrona
+                                                // 2. Delegar al Heart Agent asíncronamente
                                                 let agent_clone = Arc::clone(&heart_agent);
                                                 let tx_ai = tx_clone.clone();
                                                 let cid_clone = channel_id_clone.clone();
@@ -203,22 +167,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                         Ok(ai_response) => {
                                                             info!("🤖 JARVIS responde: {}", ai_response);
                                                             let _ = tx_ai.send(Event::new(
-                                                                cid_clone,
-                                                                "heart_agent".to_string(),
-                                                                vec!["*".to_string()],
-                                                                json!({
-                                                                    "type": "ai_response",
-                                                                    "text": ai_response,
-                                                                    "original_text": text_owned
-                                                                }),
+                                                                cid_clone, "heart_agent".to_string(), vec!["*".to_string()],
+                                                                json!({ "type": "ai_response", "text": ai_response, "original_text": text_owned }),
                                                             ));
                                                         }
                                                         Err(e) => {
                                                             error!("Heart Agent falló: {}", e);
                                                             let _ = tx_ai.send(Event::new(
-                                                                cid_clone,
-                                                                "__system__".to_string(),
-                                                                vec![client_for_error],
+                                                                cid_clone, "__system__".to_string(), vec![client_for_error],
                                                                 json!({ "type": "error", "message": format!("IA no disponible: {}", e) }),
                                                             ));
                                                         }
@@ -227,28 +183,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             }
                                             Err(e) => {
                                                 error!("Whisper failed: {}", e);
-                                                let _ = tx_clone.send(Event::new(
-                                                    channel_id_clone.clone(), "__system__".to_string(),
-                                                    vec![client_id_clone.clone()],
-                                                    json!({ "type": "error", "message": format!("Error de transcripción: {}", e) }),
-                                                ));
+                                                let _ = tx_clone.send(Event::new(channel_id_clone.clone(), "__system__".to_string(), vec![client_id_clone.clone()], json!({ "type": "error", "message": format!("Error de transcripción: {}", e) })));
                                             }
                                         }
                                     }
                                     Err(e) => {
                                         error!("Audio processing failed: {}", e);
-                                        let _ = tx_clone.send(Event::new(
-                                            channel_id_clone.clone(), "__system__".to_string(),
-                                            vec![client_id_clone.clone()],
-                                            json!({ "type": "error", "message": format!("Error procesando audio: {}", e) }),
-                                        ));
+                                        let _ = tx_clone.send(Event::new(channel_id_clone.clone(), "__system__".to_string(), vec![client_id_clone.clone()], json!({ "type": "error", "message": format!("Error procesando audio: {}", e) })));
                                     }
                                 }
                             });
                         } else {
-                            let _ = sender.send(Message::Text(
-                                json!({"type": "error", "message": "Debes enviar acción 'transcribe' con 'lang' primero"}).to_string()
-                            )).await;
+                            let _ = sender.send(Message::Text(json!({"type": "error", "message": "Debes enviar acción 'transcribe' con 'lang' primero"}).to_string())).await;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
@@ -264,7 +210,5 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         }
     }
-
-    // 5. Limpieza al desconectar
     state.channel_manager.unsubscribe(&channel_id, &client_id);
 }
