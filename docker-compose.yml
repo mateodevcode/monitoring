@@ -8,21 +8,21 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:3005:3005"
-    # Si el frontend necesita WS, Nginx hace proxy hacia este nombre de servicio.
     environment:
       - RUST_LOG=info
     env_file:
       - .env
     networks:
       - central_network
+    # Healthcheck universal que no depende de curl instalado
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3005/health"]
+      test: ["CMD-SHELL", "nc -z localhost 3005 || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 5
-      start_period: 5s
+      start_period: 10s
 
-  # EL AGENTE - control total del host, por eso va detrás de Tailscale + JWT + OTP
+  # EL AGENTE - control total del host
   admin-agent:
     build:
       context: ./admin-agent
@@ -46,9 +46,9 @@ services:
       - /sys:/sys:ro
       - /var/run/utmp:/var/run/utmp:ro
       - /var/log/wtmp:/var/log/wtmp:ro
-      - /var/log/nginx:/var/log/nginx:ro # 👈 PARA LEER ACCESS.LOG
-      - /etc/nginx:/etc/nginx:ro # 👈 PARA NGINX_FULL (sitios, certs)
-      - /etc/letsencrypt:/etc/letsencrypt:ro # 👈 PARA CERTIFICADOS
+      - /var/log/nginx:/var/log/nginx:ro
+      - /etc/nginx:/etc/nginx:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     cap_add:
       - SYS_ADMIN
       - SYS_PTRACE
@@ -56,7 +56,6 @@ services:
       - apparmor:unconfined
     networks:
       - central_network
-
     depends_on:
       socket-core:
         condition: service_healthy
