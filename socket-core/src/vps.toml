@@ -15,6 +15,7 @@ disk = "df -h"
 uptime = "uptime"
 top_procesos = "ps aux --sort=-%mem | head -10"
 
+# ho
 # --- Ejemplo de un segundo VPS ---
 # [[vps]]
 # id = "vps2"
