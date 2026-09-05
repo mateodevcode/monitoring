@@ -4,7 +4,7 @@
 
 [[vps]]
 id = "vps1"
-host = "127.0.0.1"
+host = "161.97.146.80"              # o IP pública, o IP del otro VPS
 user = "deploy"
 ssh_key_path = "/app/keys/vps1.pem"
 port = 22
