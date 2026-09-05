@@ -10,3 +10,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+
+socket-core/vps.toml
+ssh-keys/

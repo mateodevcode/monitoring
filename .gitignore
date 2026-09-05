@@ -6,3 +6,8 @@ resumen.md
 /gen-creds/
 
 ojo.md
+
+.env
+ssh-keys/
+socket-core/vps.toml
+admin-agent-data/

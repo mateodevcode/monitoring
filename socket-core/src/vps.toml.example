@@ -1,0 +1,16 @@
+# INSTRUCCIONES DE CONFIGURACIÓN
+# Este archivo es un TEMPLATE. Cópialo como vps.toml en el VPS y rellena con datos reales.
+# vps.toml NUNCA se sube al repo — vive solo en el servidor.
+
+[[vps]]
+id = "vps1"
+host = "127.0.0.1"  # O la IP del VPS que quieras monitorear
+user = "deploy"
+ssh_key_path = "/app/keys/vps1.pem"
+port = 22
+
+  [vps.commands]
+  ram = "free -h"
+  disk = "df -h"
+  uptime = "uptime"
+  top_procesos = "ps aux --sort=-%mem | head -10"

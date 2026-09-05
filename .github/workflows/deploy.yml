@@ -8,7 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # 30 min es más que suficiente para 2 servicios Rust
+    timeout-minutes: 30
 
     steps:
       - name: SSH Deploy to VPS
@@ -26,16 +26,39 @@ jobs:
             # 1. Ir al directorio de trabajo en el VPS
             cd /srv/infra/monitoring
 
-            echo "→ Descartando cambios locales no versionados..."
+            echo "→ Descartando cambios locales no versionados (pero preservando vps.toml y ssh-keys)..."
+            # Guarda vps.toml y ssh-keys antes de limpiar
+            cp -r socket-core/vps.toml /tmp/vps.toml.bak 2>/dev/null || true
+            cp -r ssh-keys /tmp/ssh-keys.bak 2>/dev/null || true
+
             git reset --hard HEAD
             git clean -fd -e admin-agent-data/
+
+            # Restaura vps.toml y ssh-keys
+            mkdir -p socket-core ssh-keys
+            cp /tmp/vps.toml.bak socket-core/vps.toml 2>/dev/null || true
+            cp -r /tmp/ssh-keys.bak/* ssh-keys/ 2>/dev/null || true
+            rm -rf /tmp/vps.toml.bak /tmp/ssh-keys.bak 2>/dev/null || true
 
             echo "→ Actualizando código desde GitHub..."
             git fetch origin main
             git reset --hard origin/main
 
+            # Restaura de nuevo por si acaso (después del reset final)
+            mkdir -p socket-core ssh-keys
+            cp /tmp/vps.toml.bak socket-core/vps.toml 2>/dev/null || true
+            cp -r /tmp/ssh-keys.bak/* ssh-keys/ 2>/dev/null || true
+            rm -rf /tmp/vps.toml.bak /tmp/ssh-keys.bak 2>/dev/null || true
+
+            echo "→ Verificando que existan vps.toml y ssh-keys..."
+            if [ ! -f socket-core/vps.toml ]; then
+              echo "⚠️  Aviso: vps.toml no existe. Copia socket-core/vps.toml.example → socket-core/vps.toml en el VPS"
+            fi
+            if [ ! -d ssh-keys ] || [ -z "$(ls -A ssh-keys)" ]; then
+              echo "⚠️  Aviso: ssh-keys está vacío. Asegúrate de tener las keys en /srv/infra/monitoring/ssh-keys/"
+            fi
+
             echo "→ Construyendo servicios (Rust optimizado)..."
-            # Construimos solo lo que cambió. Docker cachea las capas.
             docker compose build socket-core
             docker compose build admin-agent
 
@@ -47,7 +70,7 @@ jobs:
 
             echo "→ Verificando que los contenedores estén corriendo..."
             sleep 5
-            docker compose ps | grep "Up" || (echo "❌ Error: Algun contenedor no está corriendo" && exit 1)
+            docker compose ps | grep "Up" || (echo "❌ Error: Algún contenedor no está corriendo" && exit 1)
 
             echo "→ Estado final de los servicios:"
             docker compose ps
