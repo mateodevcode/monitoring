@@ -13,6 +13,9 @@ services:
       - RUST_LOG=info
     env_file:
       - .env
+    volumes:
+      - ./socket-core/vps.toml:/app/vps.toml:ro
+      - ./ssh-keys:/app/keys:ro
     networks:
       - central_network
 

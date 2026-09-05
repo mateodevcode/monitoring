@@ -34,11 +34,13 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
+
 # Instalar runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     ffmpeg \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Crear directorio para modelos

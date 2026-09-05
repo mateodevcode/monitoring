@@ -4,7 +4,10 @@ mod handlers;
 mod heart_agent;
 mod models;
 mod prompts;
+mod ssh_tool;
+mod tool_registry;
 mod tts_engine;
+mod vps_config;
 mod websocket;
 mod whisper_engine;
 
@@ -14,15 +17,18 @@ use axum::{
     Router,
 };
 use handlers::{
-    create_channel, emit_event, get_channel, get_channel_clients, health, list_channels, stats,
-    AppState,
+    create_channel, debug_execute_tool, emit_event, get_channel, get_channel_clients, health,
+    list_channels, stats, AppState,
 };
 use heart_agent::{create_provider, AiConfig};
+use ssh_tool::SshCommandTool;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tool_registry::ToolRegistry;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use tts_engine::TtsEngine;
+use vps_config::VpsConfig;
 
 #[tokio::main]
 async fn main() {
@@ -60,6 +66,28 @@ async fn main() {
     let tts_engine = Arc::new(TtsEngine::from_env());
     info!("🔊 TTS engine configured");
 
+    // 3.6. Cargar registro de VPS y construir el Tool Registry
+    let vps_config_path =
+        std::env::var("VPS_CONFIG_PATH").unwrap_or_else(|_| "/app/vps.toml".to_string());
+    let vps_config = match VpsConfig::load(&vps_config_path) {
+        Ok(cfg) => {
+            info!("🖥️  VPS registrados: {:?}", cfg.vps_ids());
+            cfg
+        }
+        Err(e) => {
+            tracing::warn!(
+                "⚠️ No se pudo cargar {} ({}). Arrancando sin VPS registrados.",
+                vps_config_path,
+                e
+            );
+            VpsConfig::default()
+        }
+    };
+
+    let mut tool_registry = ToolRegistry::new();
+    tool_registry.register(Arc::new(SshCommandTool::new(vps_config)));
+    let tool_registry = Arc::new(tool_registry);
+
     // 4. Crear el estado compartido
     let channel_manager = channel_manager::ChannelManager::new();
     let state = AppState {
@@ -67,6 +95,7 @@ async fn main() {
         whisper_engine,
         heart_agent,
         tts_engine,
+        tool_registry,
     };
 
     let app = Router::new()
@@ -77,6 +106,7 @@ async fn main() {
         .route("/channels/:id", get(get_channel))
         .route("/channels/:id/clients", get(get_channel_clients))
         .route("/channels/:id/events", post(emit_event))
+        .route("/debug/tools/execute", post(debug_execute_tool))
         .route("/ws", get(websocket::websocket_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB
         .layer(CorsLayer::permissive())
