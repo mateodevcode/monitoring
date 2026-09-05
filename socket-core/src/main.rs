@@ -4,6 +4,7 @@ mod handlers;
 mod heart_agent;
 mod models;
 mod prompts;
+mod tts_engine;
 mod websocket;
 mod whisper_engine;
 
@@ -21,6 +22,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::info;
+use tts_engine::TtsEngine;
 
 #[tokio::main]
 async fn main() {
@@ -54,12 +56,17 @@ async fn main() {
     let heart_agent = create_provider(&ai_config);
     info!("🤖 AI Provider configured: {}", ai_config.provider);
 
+    // 3.5. Inicializar TTS Engine (reutiliza AI_API_KEY de Gemini)
+    let tts_engine = Arc::new(TtsEngine::from_env());
+    info!("🔊 TTS engine configured");
+
     // 4. Crear el estado compartido
     let channel_manager = channel_manager::ChannelManager::new();
     let state = AppState {
         channel_manager,
         whisper_engine,
         heart_agent,
+        tts_engine,
     };
 
     let app = Router::new()

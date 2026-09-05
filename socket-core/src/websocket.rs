@@ -6,16 +6,29 @@ use axum::extract::{
     State,
 };
 use axum::response::IntoResponse;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(|socket| handle_socket(socket, state))
+}
+
+/// Sintetiza voz para `text` y devuelve el audio en base64 (WAV), o None si falla
+/// (un fallo de TTS no debe tumbar la respuesta de texto).
+async fn try_synthesize(state: &AppState, text: &str) -> Option<String> {
+    match state.tts_engine.synthesize(text).await {
+        Ok(wav_bytes) => Some(STANDARD.encode(wav_bytes)),
+        Err(e) => {
+            warn!("⚠️ TTS falló, se envía solo texto: {}", e);
+            None
+        }
+    }
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
@@ -121,7 +134,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         let user_text = obj.get("text").and_then(|v| v.as_str()).map(|s| s.to_string());
 
                                         if let Some(text_owned) = user_text {
-                                            // Avisamos que empezamos a procesar (mismo evento "status" que usa el flujo de audio)
                                             let _ = tx.send(Event::new(
                                                 channel_id.clone(),
                                                 "__system__".to_string(),
@@ -129,28 +141,34 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 json!({ "type": "status", "message": "💬 Procesando mensaje..." }),
                                             ));
 
-                                            let heart_agent = Arc::clone(&state.heart_agent);
+                                            let state_clone = state.clone();
                                             let tx_ai = tx.clone();
                                             let cid_clone = channel_id.clone();
                                             let client_for_error = client_id.clone();
 
                                             tokio::spawn(async move {
-                                                match heart_agent.ask(&text_owned).await {
+                                                match state_clone.heart_agent.ask(&text_owned).await {
                                                     Ok(ai_response) => {
                                                         info!("🤖 JARVIS responde (texto): {}", ai_response);
+                                                        let audio_b64 = try_synthesize(&state_clone, &ai_response).await;
+
+                                                        let mut payload = json!({
+                                                            "type": "ai_response",
+                                                            "text": ai_response,
+                                                            "original_text": text_owned
+                                                        });
+                                                        if let Some(audio) = audio_b64 {
+                                                            payload["audio"] = json!(audio);
+                                                        }
+
                                                         let _ = tx_ai.send(Event::new(
-                                                            cid_clone,
-                                                            "heart_agent".to_string(),
-                                                            vec!["*".to_string()],
-                                                            json!({ "type": "ai_response", "text": ai_response, "original_text": text_owned }),
+                                                            cid_clone, "heart_agent".to_string(), vec!["*".to_string()], payload,
                                                         ));
                                                     }
                                                     Err(e) => {
                                                         error!("Heart Agent falló (texto): {}", e);
                                                         let _ = tx_ai.send(Event::new(
-                                                            cid_clone,
-                                                            "__system__".to_string(),
-                                                            vec![client_for_error],
+                                                            cid_clone, "__system__".to_string(), vec![client_for_error],
                                                             json!({ "type": "error", "message": format!("IA no disponible: {}", e) }),
                                                         ));
                                                     }
@@ -177,7 +195,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             ));
 
                             let whisper_engine = Arc::clone(&state.whisper_engine);
-                            let heart_agent = Arc::clone(&state.heart_agent);
+                            let state_clone = state.clone();
                             let lang_clone = lang.clone();
                             let tx_clone = tx.clone();
                             let channel_id_clone = channel_id.clone();
@@ -206,19 +224,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 ));
 
                                                 // 2. Delegar al Heart Agent asíncronamente
-                                                let agent_clone = Arc::clone(&heart_agent);
+                                                let state_for_agent = state_clone.clone();
                                                 let tx_ai = tx_clone.clone();
                                                 let cid_clone = channel_id_clone.clone();
                                                 let client_for_error = client_id_clone.clone();
                                                 let text_owned = text.clone();
 
                                                 tokio::spawn(async move {
-                                                    match agent_clone.ask(&text_owned).await {
+                                                    match state_for_agent.heart_agent.ask(&text_owned).await {
                                                         Ok(ai_response) => {
                                                             info!("🤖 JARVIS responde: {}", ai_response);
+                                                            let audio_b64 = try_synthesize(&state_for_agent, &ai_response).await;
+
+                                                            let mut payload = json!({
+                                                                "type": "ai_response",
+                                                                "text": ai_response,
+                                                                "original_text": text_owned
+                                                            });
+                                                            if let Some(audio) = audio_b64 {
+                                                                payload["audio"] = json!(audio);
+                                                            }
+
                                                             let _ = tx_ai.send(Event::new(
-                                                                cid_clone, "heart_agent".to_string(), vec!["*".to_string()],
-                                                                json!({ "type": "ai_response", "text": ai_response, "original_text": text_owned }),
+                                                                cid_clone, "heart_agent".to_string(), vec!["*".to_string()], payload,
                                                             ));
                                                         }
                                                         Err(e) => {

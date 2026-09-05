@@ -1,6 +1,7 @@
 use crate::channel_manager::ChannelManager;
 use crate::heart_agent::AiProvider;
 use crate::models::*;
+use crate::tts_engine::TtsEngine;
 use crate::whisper_engine::WhisperEngine;
 use axum::{
     extract::{Path, State},
@@ -16,6 +17,7 @@ pub struct AppState {
     pub channel_manager: ChannelManager,
     pub whisper_engine: Arc<WhisperEngine>,
     pub heart_agent: Arc<dyn AiProvider>,
+    pub tts_engine: Arc<TtsEngine>,
 }
 
 pub async fn health() -> impl IntoResponse {
