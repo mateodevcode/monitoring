@@ -3,7 +3,7 @@ use crate::models_extended::{LLmResponse, ToolCall, ToolResult};
 use crate::tool_registry::ToolRegistry;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 /// Orquesta la ejecución del agente: pregunta al LLM, ejecuta tools, itera hasta respuesta final
 pub struct AgentExecutor {
@@ -23,6 +23,8 @@ impl AgentExecutor {
     pub async fn execute(&self, user_message: &str) -> Result<String, String> {
         let max_iterations = 5;
         let mut iteration = 0;
+
+        // Inicializamos el historial con el mensaje del usuario
         let mut messages: Vec<Value> = vec![json!({"role": "user", "content": user_message})];
 
         loop {
@@ -33,11 +35,13 @@ impl AgentExecutor {
             }
 
             info!("🔄 Iteración {} del agente agentico", iteration);
+            debug!("📜 Historial actual: {:?}", messages);
 
             // 1. Pregunta al LLM con el contexto actual (mensajes + tools disponibles)
+            // IMPORTANTE: pasamos "" como user_message porque el mensaje del usuario ya está en messages
             let response = self
                 .ai_provider
-                .ask_with_tools(user_message, &messages, &self.tool_registry)
+                .ask_with_tools("", &messages, &self.tool_registry)
                 .await
                 .map_err(|e| format!("Error LLM: {}", e))?;
 
@@ -49,16 +53,35 @@ impl AgentExecutor {
                 LLmResponse::ToolCalls(tool_calls) => {
                     info!("🛠️  Agente quiere ejecutar {} tools", tool_calls.len());
 
-                    let mut tool_results = Vec::new();
+                    // 1. Añadir el mensaje del assistant con las tool_calls al historial
+                    let assistant_msg = json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": tool_calls.iter().map(|tc| {
+                            // Convertir arguments a string JSON (la API espera un string)
+                            let args_str = serde_json::to_string(&tc.arguments)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": args_str
+                                }
+                            })
+                        }).collect::<Vec<Value>>()
+                    });
+                    messages.push(assistant_msg);
+                    debug!("📜 Historial después de assistant: {:?}", messages);
 
-                    // 2. Ejecuta cada tool call
-                    for tool_call in tool_calls {
-                        let result = self.execute_tool_call(&tool_call).await;
+                    // 2. Ejecutar cada tool call
+                    let mut tool_results = Vec::new();
+                    for tool_call in &tool_calls {
+                        let result = self.execute_tool_call(tool_call).await;
                         tool_results.push(result);
                     }
 
-                    // 3. Agrega los resultados al historial de mensajes
-                    // (así el LLM ve qué tools ejecutamos y qué resultados tuvieron)
+                    // 3. Agregar los resultados al historial de mensajes
                     for result in tool_results {
                         messages.push(json!({
                             "role": "tool",
@@ -67,6 +90,7 @@ impl AgentExecutor {
                             "content": result.content
                         }));
                     }
+                    debug!("📜 Historial después de tools: {:?}", messages);
 
                     // 4. Siguiente iteración: el LLM responde basándose en los resultados
                 }
