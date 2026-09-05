@@ -1,8 +1,10 @@
+mod agent_executor;
 mod audio_processor;
 mod channel_manager;
 mod handlers;
 mod heart_agent;
 mod models;
+mod models_extended;
 mod prompts;
 mod ssh_tool;
 mod tool_registry;
@@ -11,6 +13,7 @@ mod vps_config;
 mod websocket;
 mod whisper_engine;
 
+use agent_executor::AgentExecutor;
 use axum::{
     extract::DefaultBodyLimit,
     routing::{get, post},
@@ -62,7 +65,7 @@ async fn main() {
     let heart_agent = create_provider(&ai_config);
     info!("🤖 AI Provider configured: {}", ai_config.provider);
 
-    // 3.5. Inicializar TTS Engine (reutiliza AI_API_KEY de Gemini)
+    // 3.5. Inicializar TTS Engine (reutiliza API key de Gemini)
     let tts_engine = Arc::new(TtsEngine::from_env());
     info!("🔊 TTS engine configured");
 
@@ -88,6 +91,13 @@ async fn main() {
     tool_registry.register(Arc::new(SshCommandTool::new(vps_config)));
     let tool_registry = Arc::new(tool_registry);
 
+    // 3.7. Inicializar AgentExecutor (orquesta el loop de function calling)
+    let agent_executor = Arc::new(AgentExecutor::new(
+        Arc::clone(&heart_agent),
+        Arc::clone(&tool_registry),
+    ));
+    info!("🤖 AgentExecutor initialized");
+
     // 4. Crear el estado compartido
     let channel_manager = channel_manager::ChannelManager::new();
     let state = AppState {
@@ -96,6 +106,7 @@ async fn main() {
         heart_agent,
         tts_engine,
         tool_registry,
+        agent_executor,
     };
 
     let app = Router::new()

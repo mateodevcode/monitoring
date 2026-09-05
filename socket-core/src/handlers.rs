@@ -1,3 +1,4 @@
+use crate::agent_executor::AgentExecutor;
 use crate::channel_manager::ChannelManager;
 use crate::heart_agent::AiProvider;
 use crate::models::*;
@@ -20,6 +21,7 @@ pub struct AppState {
     pub heart_agent: Arc<dyn AiProvider>,
     pub tts_engine: Arc<TtsEngine>,
     pub tool_registry: Arc<ToolRegistry>,
+    pub agent_executor: Arc<AgentExecutor>,
 }
 
 pub async fn health() -> impl IntoResponse {
@@ -121,9 +123,6 @@ pub async fn emit_event(
 
 /// Endpoint de depuración: permite probar cualquier tool registrada directamente por HTTP,
 /// sin pasar por el LLM. Útil para validar el Agente SSH antes de conectar el function calling.
-/// Ej: curl -X POST http://localhost:3005/debug/tools/execute \
-///       -H "Content-Type: application/json" \
-///       -d '{"tool":"run_vps_command","args":{"vps_id":"vps1","command_name":"ram"}}'
 pub async fn debug_execute_tool(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,

@@ -147,9 +147,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                             let client_for_error = client_id.clone();
 
                                             tokio::spawn(async move {
-                                                match state_clone.heart_agent.ask(&text_owned).await {
+                                                // 🔥 AQUÍ USAMOS EL AGENT EXECUTOR CON FUNCTION CALLING
+                                                match state_clone.agent_executor.execute(&text_owned).await {
                                                     Ok(ai_response) => {
-                                                        info!("🤖 JARVIS responde (texto): {}", ai_response);
+                                                        info!("🤖 JARVIS responde (con tools): {}", ai_response);
                                                         let audio_b64 = try_synthesize(&state_clone, &ai_response).await;
 
                                                         let mut payload = json!({
@@ -166,10 +167,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                         ));
                                                     }
                                                     Err(e) => {
-                                                        error!("Heart Agent falló (texto): {}", e);
+                                                        error!("Agent Executor falló: {}", e);
                                                         let _ = tx_ai.send(Event::new(
                                                             cid_clone, "__system__".to_string(), vec![client_for_error],
-                                                            json!({ "type": "error", "message": format!("IA no disponible: {}", e) }),
+                                                            json!({ "type": "error", "message": format!("Error en el agente: {}", e) }),
                                                         ));
                                                     }
                                                 }
@@ -223,7 +224,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                     json!({ "type": "transcription", "text": text.clone(), "duration_secs": duration }),
                                                 ));
 
-                                                // 2. Delegar al Heart Agent asíncronamente
+                                                // 2. Delegar al AgentExecutor (con function calling)
                                                 let state_for_agent = state_clone.clone();
                                                 let tx_ai = tx_clone.clone();
                                                 let cid_clone = channel_id_clone.clone();
@@ -231,9 +232,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                 let text_owned = text.clone();
 
                                                 tokio::spawn(async move {
-                                                    match state_for_agent.heart_agent.ask(&text_owned).await {
+                                                    // 🔥 AQUÍ USAMOS EL AGENT EXECUTOR CON FUNCTION CALLING
+                                                    match state_for_agent.agent_executor.execute(&text_owned).await {
                                                         Ok(ai_response) => {
-                                                            info!("🤖 JARVIS responde: {}", ai_response);
+                                                            info!("🤖 JARVIS responde (con tools): {}", ai_response);
                                                             let audio_b64 = try_synthesize(&state_for_agent, &ai_response).await;
 
                                                             let mut payload = json!({
@@ -250,10 +252,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                                             ));
                                                         }
                                                         Err(e) => {
-                                                            error!("Heart Agent falló: {}", e);
+                                                            error!("Agent Executor falló: {}", e);
                                                             let _ = tx_ai.send(Event::new(
                                                                 cid_clone, "__system__".to_string(), vec![client_for_error],
-                                                                json!({ "type": "error", "message": format!("IA no disponible: {}", e) }),
+                                                                json!({ "type": "error", "message": format!("Error en el agente: {}", e) }),
                                                             ));
                                                         }
                                                     }
